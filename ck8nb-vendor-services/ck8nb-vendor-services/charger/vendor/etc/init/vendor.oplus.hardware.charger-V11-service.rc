@@ -1,0 +1,6 @@
+service oplus_charger_hal_service /vendor/bin/hw/vendor.oplus.hardware.charger-V11-service
+    class hal
+    user root
+    group system readproc root
+    capabilities SYS_PTRACE
+    interface aidl vendor.oplus.hardware.charger.ICharger/default
