@@ -14,18 +14,20 @@ jobs:
           targets: aarch64-linux-android
 
       - name: Build aarch64 service
-        working-directory: face-stub
+        working-directory: ck8nb-vendor-services/face-stub
         run: |
           export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
           echo "Using NDK: $ANDROID_NDK_HOME"
+          chmod +x build.sh
           ./build.sh
 
       - name: Assemble ready-to-copy vendor tree
         run: |
+          S=ck8nb-vendor-services/face-stub
           mkdir -p dist
-          cp -r face-stub/vendor dist/vendor
+          cp -r $S/vendor dist/vendor
           mkdir -p dist/vendor/bin/hw
-          cp face-stub/out/android.hardware.biometrics.face-service dist/vendor/bin/hw/
+          cp $S/out/android.hardware.biometrics.face-service dist/vendor/bin/hw/
           chmod 0755 dist/vendor/bin/hw/android.hardware.biometrics.face-service
           find dist -type f
 
