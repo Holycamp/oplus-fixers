@@ -19,7 +19,10 @@ fn main() {
     logging::init_rsbinder_logger();
     logging::info("face-stub starting");
 
-    ProcessState::init_default();
+    if let Err(e) = ProcessState::init_default() {
+        logging::error(&format!("binder init failed: {:?}", e));
+        std::process::exit(1);
+    }
     ProcessState::start_thread_pool();
 
     let binder = BnFace::new_binder(FaceHal::new());

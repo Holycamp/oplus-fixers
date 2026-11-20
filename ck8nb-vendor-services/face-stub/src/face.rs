@@ -8,7 +8,7 @@
 // hence getAuthenticatorId returns 0.
 #![allow(non_snake_case, dead_code)]
 
-use rsbinder::{status::Result as BinderResult, Interface, Strong};
+use rsbinder::{BinderResult, Interface, Strong};
 
 use crate::bindings::android::hardware::biometrics::common::CommonProps::CommonProps;
 use crate::bindings::android::hardware::biometrics::common::ComponentInfo::ComponentInfo;

@@ -21,7 +21,7 @@ use crate::logging;
 pub struct NoopCancel;
 impl Interface for NoopCancel {}
 impl ICancellationSignal for NoopCancel {
-    fn cancel(&self) -> rsbinder::status::Result<()> {
+    fn cancel(&self) -> rsbinder::BinderResult<()> {
         Ok(())
     }
 }
@@ -39,7 +39,7 @@ impl FaceSession {
         Self { callback }
     }
 
-    fn fail(&self) -> rsbinder::status::Result<Strong<dyn ICancellationSignal>> {
+    fn fail(&self) -> rsbinder::BinderResult<Strong<dyn ICancellationSignal>> {
         let _ = self.callback.onError(FaceError::UNABLE_TO_PROCESS, 0);
         Ok(BnCancellationSignal::new_binder(NoopCancel))
     }
@@ -48,17 +48,17 @@ impl FaceSession {
 impl Interface for FaceSession {}
 
 impl ISession for FaceSession {
-    fn generateChallenge(&self) -> rsbinder::status::Result<()> {
+    fn generateChallenge(&self) -> rsbinder::BinderResult<()> {
         self.callback.onChallengeGenerated(0x5FACE000)?;
         Ok(())
     }
 
-    fn revokeChallenge(&self, challenge: i64) -> rsbinder::status::Result<()> {
+    fn revokeChallenge(&self, challenge: i64) -> rsbinder::BinderResult<()> {
         self.callback.onChallengeRevoked(challenge)?;
         Ok(())
     }
 
-    fn getEnrollmentConfig(&self, _type: EnrollmentType) -> rsbinder::status::Result<Vec<EnrollmentStageConfig>> {
+    fn getEnrollmentConfig(&self, _type: EnrollmentType) -> rsbinder::BinderResult<Vec<EnrollmentStageConfig>> {
         Ok(vec![])
     }
 
@@ -68,56 +68,56 @@ impl ISession for FaceSession {
         _type: i8,
         _features: &[u8],
         _preview_surface: Option<&NativeHandle>,
-    ) -> rsbinder::status::Result<Strong<dyn ICancellationSignal>> {
+    ) -> rsbinder::BinderResult<Strong<dyn ICancellationSignal>> {
         logging::info("stub: enroll -> UNABLE_TO_PROCESS");
         self.fail()
     }
 
-    fn authenticate(&self, _operation_id: i64) -> rsbinder::status::Result<Strong<dyn ICancellationSignal>> {
+    fn authenticate(&self, _operation_id: i64) -> rsbinder::BinderResult<Strong<dyn ICancellationSignal>> {
         logging::info("stub: authenticate -> UNABLE_TO_PROCESS");
         self.fail()
     }
 
-    fn detectInteraction(&self) -> rsbinder::status::Result<Strong<dyn ICancellationSignal>> {
+    fn detectInteraction(&self) -> rsbinder::BinderResult<Strong<dyn ICancellationSignal>> {
         self.fail()
     }
 
-    fn enumerateEnrollments(&self) -> rsbinder::status::Result<()> {
+    fn enumerateEnrollments(&self) -> rsbinder::BinderResult<()> {
         self.callback.onEnrollmentsEnumerated(&[])?;
         Ok(())
     }
 
-    fn removeEnrollments(&self, enrollment_ids: &[i32]) -> rsbinder::status::Result<()> {
+    fn removeEnrollments(&self, enrollment_ids: &[i32]) -> rsbinder::BinderResult<()> {
         self.callback.onEnrollmentsRemoved(enrollment_ids)?;
         Ok(())
     }
 
-    fn getFeatures(&self) -> rsbinder::status::Result<()> {
+    fn getFeatures(&self) -> rsbinder::BinderResult<()> {
         self.callback.onFeaturesRetrieved(&[])?;
         Ok(())
     }
 
-    fn setFeature(&self, _hat: &HardwareAuthToken, feature: Feature, _enabled: bool) -> rsbinder::status::Result<()> {
+    fn setFeature(&self, _hat: &HardwareAuthToken, feature: Feature, _enabled: bool) -> rsbinder::BinderResult<()> {
         self.callback.onFeatureSet(feature)?;
         Ok(())
     }
 
-    fn getAuthenticatorId(&self) -> rsbinder::status::Result<()> {
+    fn getAuthenticatorId(&self) -> rsbinder::BinderResult<()> {
         self.callback.onAuthenticatorIdRetrieved(0)?;
         Ok(())
     }
 
-    fn invalidateAuthenticatorId(&self) -> rsbinder::status::Result<()> {
+    fn invalidateAuthenticatorId(&self) -> rsbinder::BinderResult<()> {
         self.callback.onAuthenticatorIdInvalidated(0)?;
         Ok(())
     }
 
-    fn resetLockout(&self, _hat: &HardwareAuthToken) -> rsbinder::status::Result<()> {
+    fn resetLockout(&self, _hat: &HardwareAuthToken) -> rsbinder::BinderResult<()> {
         self.callback.onLockoutCleared()?;
         Ok(())
     }
 
-    fn close(&self) -> rsbinder::status::Result<()> {
+    fn close(&self) -> rsbinder::BinderResult<()> {
         self.callback.onSessionClosed()?;
         Ok(())
     }
@@ -126,7 +126,7 @@ impl ISession for FaceSession {
         &self,
         operation_id: i64,
         _context: &OperationContext,
-    ) -> rsbinder::status::Result<Strong<dyn ICancellationSignal>> {
+    ) -> rsbinder::BinderResult<Strong<dyn ICancellationSignal>> {
         self.authenticate(operation_id)
     }
 
@@ -137,18 +137,18 @@ impl ISession for FaceSession {
         features: &[u8],
         preview_surface: Option<&NativeHandle>,
         _context: &OperationContext,
-    ) -> rsbinder::status::Result<Strong<dyn ICancellationSignal>> {
+    ) -> rsbinder::BinderResult<Strong<dyn ICancellationSignal>> {
         self.enroll(hat, r#type, features, preview_surface)
     }
 
     fn detectInteractionWithContext(
         &self,
         _context: &OperationContext,
-    ) -> rsbinder::status::Result<Strong<dyn ICancellationSignal>> {
+    ) -> rsbinder::BinderResult<Strong<dyn ICancellationSignal>> {
         self.detectInteraction()
     }
 
-    fn onContextChanged(&self, _context: &OperationContext) -> rsbinder::status::Result<()> {
+    fn onContextChanged(&self, _context: &OperationContext) -> rsbinder::BinderResult<()> {
         Ok(())
     }
 }

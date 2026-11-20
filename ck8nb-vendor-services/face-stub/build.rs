@@ -34,19 +34,7 @@ fn main() {
         .generate()
         .expect("failed to generate face AIDL bindings");
 
-    // rsbinder's generated traits are async in 0.6; the service impls use
-    // #[async_trait], so the generated traits need the attribute too.
     let mut content = std::fs::read_to_string(&out_file).unwrap();
-    for t in [
-        "IFaceAsyncService",
-        "ISessionAsyncService",
-        "ISessionCallbackAsyncService",
-        "ICancellationSignalAsyncService",
-    ] {
-        let target = format!("pub trait {}: rsbinder::Interface", t);
-        let repl = format!("#[async_trait::async_trait]\npub trait {}: rsbinder::Interface", t);
-        content = content.replace(&target, &repl);
-    }
 
     // The framework's IFace$Stub answers getInterfaceHash/getInterfaceVersion at
     // AIDL's reserved codes 0xfffffe / 0xffffff, not as sequential methods — the
@@ -55,7 +43,7 @@ fn main() {
     // FaceStartUserClient treats that as a remote exception and finishes the
     // client without authenticating. Inject them into every generated dispatch.
     let mut patched = String::with_capacity(content.len() + 768);
-    let needle = "_ => Err(rsbinder::StatusCode::UnknownTransaction),";
+    let needle = "_ => ::core::result::Result::Err(rsbinder::StatusCode::UnknownTransaction),";
     let mut injected = 0usize;
     for line in content.lines() {
         if line.trim() == needle {
