@@ -1,7 +1,7 @@
 // IDisplayPanelFeature V1 HAL for Tecno CK8nB (Transsion panel, MTK).
 // SystemUI / FingerprintService call get/setDisplayPanelFeatureValue with numeric feature ids
 // during FOD enroll and unlock. The stock service answered them; with no service the calls fail
-// and fingerprint enroll hangs. This one answers every call with success (0), echoes the values
+// and fingerprint enroll hangs. This one answers "not supported" (-1) to every call and
 // back unchanged, and logs each id so the real ones can be mapped from logcat (tag OplusDpfHal).
 //
 // The panel HBM for FOD is already driven by the kernel (FTS finger-down -> panel_hbm_set_cmdq),
@@ -21,21 +21,19 @@ impl Interface for Dpf {}
 impl IDisplayPanelFeature for Dpf {
     fn getDisplayPanelFeatureValue(&self, id: i32, values: &mut Vec<i32>) -> BinderResult<i32> {
         logging::info(&format!("get id={id} in={values:?}"));
-        if values.is_empty() {
-            values.push(0);
-        }
-        Ok(0)
+        // Leave the array untouched and report "not supported". Answering success for unknown ids
+        // made system_server enable every panel feature at startup and boot_monitor rebooted.
+        Ok(-1)
     }
 
     fn setDisplayPanelFeatureValue(&self, id: i32, values: &[i32]) -> BinderResult<i32> {
         logging::info(&format!("set id={id} values={values:?}"));
-        Ok(0)
+        Ok(-1)
     }
 
     fn getDisplayPanelInfo(&self, id: i32, info: &mut Vec<String>) -> BinderResult<i32> {
         logging::info(&format!("info id={id}"));
-        info.clear();
-        Ok(0)
+        Ok(-1)
     }
 }
 
