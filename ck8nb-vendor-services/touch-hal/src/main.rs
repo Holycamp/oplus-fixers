@@ -1,0 +1,129 @@
+// IOplusTouch V2 HAL for Transsion tran_touch / FocalTech (Tecno CK8nB).
+// The framework (ColorTouchNodeManagerService) writes numbered "node flags" through this
+// interface. Flag 1 = double-tap-to-wake enable. Every call is logged under tag OplusTouchHal
+// so unknown flags (draw gestures etc.) can be mapped from a logcat.
+mod bindings;
+mod logging;
+
+use rsbinder::{hub, BinderResult, Interface, ProcessState, Strong};
+use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use bindings::{BnOplusTouch, IOplusTouch, IOplusTouchEventCallback, OplusTouchInfo, OplusTouchStatus};
+
+const SERVICE_NAME: &str = "vendor.oplus.hardware.touch.IOplusTouch/default";
+const GESTURE_FN: &str = "/proc/gesture_function";
+const GESTURE_STATE: &str = "/proc/gesture_state";
+
+const NODE_DOUBLE_TAP: i32 = 1;
+const NODE_DOUBLE_TAP_INDEP: i32 = 21;
+
+static DT2W: AtomicBool = AtomicBool::new(false);
+
+fn write_node(path: &str, v: &str) -> bool {
+    match fs::write(path, v) {
+        Ok(_) => true,
+        Err(e) => {
+            logging::error(&format!("write {path} <- {v:?} failed: {e}"));
+            false
+        }
+    }
+}
+
+/// Kernel format is "<2-char code><digit>"; "cc1" enables double click (confirmed on device).
+/// The disable digit is not documented, so try 0 then 2 and verify through gesture_state.
+fn set_double_tap(on: bool) -> bool {
+    DT2W.store(on, Ordering::Relaxed);
+    if on {
+        return write_node(GESTURE_FN, "cc1");
+    }
+    let ok = write_node(GESTURE_FN, "cc0") || write_node(GESTURE_FN, "cc2");
+    logging::info(&format!("double tap off ok={ok}"));
+    ok
+}
+
+struct TouchHal;
+impl Interface for TouchHal {}
+
+impl IOplusTouch for TouchHal {
+    fn initialize(&self) -> BinderResult<OplusTouchStatus> {
+        logging::info("initialize");
+        Ok(OplusTouchStatus::OK)
+    }
+
+    fn isTouchNodeSupport(&self, d: i32, flag: i32) -> BinderResult<i32> {
+        let s = matches!(flag, NODE_DOUBLE_TAP | NODE_DOUBLE_TAP_INDEP) as i32;
+        logging::info(&format!("isTouchNodeSupport dev={d} flag={flag} -> {s}"));
+        Ok(s)
+    }
+
+    fn touchReadNodeFile(&self, d: i32, flag: i32) -> BinderResult<String> {
+        let v = match flag {
+            NODE_DOUBLE_TAP | NODE_DOUBLE_TAP_INDEP => {
+                if DT2W.load(Ordering::Relaxed) { "1" } else { "0" }.to_string()
+            }
+            _ => String::from("0"),
+        };
+        logging::info(&format!("read dev={d} flag={flag} -> {v}"));
+        Ok(v)
+    }
+
+    fn touchWriteNodeFile(&self, d: i32, flag: i32, info: &str) -> BinderResult<i32> {
+        logging::info(&format!("write dev={d} flag={flag} value={info:?}"));
+        match flag {
+            NODE_DOUBLE_TAP => {
+                let on = info.trim() != "0";
+                Ok(if set_double_tap(on) { 0 } else { -1 })
+            }
+            NODE_DOUBLE_TAP_INDEP => Ok(0),
+            _ => Ok(0),
+        }
+    }
+
+    fn touchWriteBtInfo(&self, d: i32, flag: i32, info: &str) -> BinderResult<i32> {
+        logging::info(&format!("btinfo dev={d} flag={flag} value={info:?}"));
+        Ok(0)
+    }
+
+    fn touchWriteNodeFileOneWay(&self, d: i32, flag: i32, info: &str) -> BinderResult<()> {
+        logging::info(&format!("write-oneway dev={d} flag={flag} value={info:?}"));
+        if flag == NODE_DOUBLE_TAP {
+            set_double_tap(info.trim() != "0");
+        }
+        Ok(())
+    }
+
+    fn touchNotifyClient(&self, c: i32, info: &OplusTouchInfo) -> BinderResult<OplusTouchStatus> {
+        logging::info(&format!("notifyClient {c} dev={} flag={} data={} info={:?}", info.deviceId, info.nodeFlag, info.data, info.info));
+        Ok(OplusTouchStatus::OK)
+    }
+
+    fn registerEventCallback(&self, _cb: &Strong<dyn IOplusTouchEventCallback>) -> BinderResult<OplusTouchStatus> {
+        logging::info("registerEventCallback");
+        Ok(OplusTouchStatus::OK)
+    }
+
+    fn unregisterEventCallback(&self, _cb: &Strong<dyn IOplusTouchEventCallback>) -> BinderResult<OplusTouchStatus> {
+        Ok(OplusTouchStatus::OK)
+    }
+}
+
+fn main() {
+    logging::init();
+    logging::init_rsbinder_logger();
+    let _ = fs::metadata(GESTURE_STATE);
+    if let Err(e) = ProcessState::init_default() {
+        logging::error(&format!("binder init failed: {e:?}"));
+        std::process::exit(1);
+    }
+    ProcessState::start_thread_pool();
+    let binder = BnOplusTouch::new_binder(TouchHal);
+    match hub::add_service(SERVICE_NAME, binder.as_binder()) {
+        Ok(()) => logging::info(&format!("registered {SERVICE_NAME}")),
+        Err(e) => {
+            logging::error(&format!("register failed: {e:?}"));
+            std::process::exit(1);
+        }
+    }
+    let _ = ProcessState::join_thread_pool();
+}
