@@ -23,7 +23,7 @@
 package vendor.oplus.hardware.displaypanelfeature;
 @VintfStability
 interface IDisplayPanelFeature {
-  int getDisplayPanelFeatureValue(int featureId, inout int[] featureValues);
+  int getDisplayPanelFeatureValue(int featureId, out int[] featureValues);
   int setDisplayPanelFeatureValue(int featureId, in int[] featureValues);
   int getDisplayPanelInfo(int featureId, out List<String> panelInfo);
 }

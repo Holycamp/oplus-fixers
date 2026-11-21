@@ -1,15 +1,15 @@
 // IDisplayPanelFeature V1 HAL for Tecno CK8nB (Transsion panel, MTK).
 // SystemUI / FingerprintService call get/setDisplayPanelFeatureValue with numeric feature ids
 // during FOD enroll and unlock. The stock service answered them; with no service the calls fail
-// and fingerprint enroll hangs. This one answers "not supported" (-1) to every call and
-// back unchanged, and logs each id so the real ones can be mapped from logcat (tag OplusDpfHal).
+// and fingerprint enroll hangs. This one answers success with value 0 and logs each id
+// (tag OplusDpfHal) so the ones FOD needs can be mapped from logcat.
 //
 // The panel HBM for FOD is already driven by the kernel (FTS finger-down -> panel_hbm_set_cmdq),
 // so this HAL deliberately does not write brightness nodes by itself.
 mod bindings;
 mod logging;
 
-use rsbinder::{hub, BinderResult, Interface, ProcessState, Status, StatusCode};
+use rsbinder::{hub, BinderResult, Interface, ProcessState};
 
 use bindings::{BnDisplayPanelFeature, IDisplayPanelFeature};
 
@@ -19,21 +19,28 @@ struct Dpf;
 impl Interface for Dpf {}
 
 impl IDisplayPanelFeature for Dpf {
+    // The ROM's framework declares `out int[]` (it sends only the array length), not the `inout`
+    // of the LineageOS V1 snapshot, so the AIDL in this crate uses `out`.
     fn getDisplayPanelFeatureValue(&self, id: i32, values: &mut Vec<i32>) -> BinderResult<i32> {
-        logging::info(&format!("get id={id} in={values:?}"));
-        // Leave the array untouched and report "not supported". Answering success for unknown ids
-        // made system_server enable every panel feature at startup and boot_monitor rebooted.
-        Err(Status::from(StatusCode::UnknownTransaction))
+        logging::info(&format!("get id={id} len={}", values.len()));
+        if values.is_empty() {
+            values.push(0);
+        }
+        for v in values.iter_mut() {
+            *v = 0;
+        }
+        Ok(0)
     }
 
     fn setDisplayPanelFeatureValue(&self, id: i32, values: &[i32]) -> BinderResult<i32> {
         logging::info(&format!("set id={id} values={values:?}"));
-        Err(Status::from(StatusCode::UnknownTransaction))
+        Ok(0)
     }
 
     fn getDisplayPanelInfo(&self, id: i32, info: &mut Vec<String>) -> BinderResult<i32> {
         logging::info(&format!("info id={id}"));
-        Err(Status::from(StatusCode::UnknownTransaction))
+        info.clear();
+        Ok(0)
     }
 }
 
