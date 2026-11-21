@@ -9,7 +9,7 @@
 mod bindings;
 mod logging;
 
-use rsbinder::{hub, BinderResult, Interface, ProcessState};
+use rsbinder::{hub, BinderResult, Interface, ProcessState, Status, StatusCode};
 
 use bindings::{BnDisplayPanelFeature, IDisplayPanelFeature};
 
@@ -23,17 +23,17 @@ impl IDisplayPanelFeature for Dpf {
         logging::info(&format!("get id={id} in={values:?}"));
         // Leave the array untouched and report "not supported". Answering success for unknown ids
         // made system_server enable every panel feature at startup and boot_monitor rebooted.
-        Ok(-1)
+        Err(Status::from(StatusCode::UnknownTransaction))
     }
 
     fn setDisplayPanelFeatureValue(&self, id: i32, values: &[i32]) -> BinderResult<i32> {
         logging::info(&format!("set id={id} values={values:?}"));
-        Ok(-1)
+        Err(Status::from(StatusCode::UnknownTransaction))
     }
 
     fn getDisplayPanelInfo(&self, id: i32, info: &mut Vec<String>) -> BinderResult<i32> {
         logging::info(&format!("info id={id}"));
-        Ok(-1)
+        Err(Status::from(StatusCode::UnknownTransaction))
     }
 }
 
