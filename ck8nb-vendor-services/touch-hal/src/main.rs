@@ -20,6 +20,25 @@ const NODE_DOUBLE_TAP_INDEP: i32 = 21;
 
 static DT2W: AtomicBool = AtomicBool::new(false);
 
+/// Log which touch/FOD related nodes exist, so unknown framework flags can be mapped from one logcat.
+fn inventory() {
+    for dir in ["/proc", "/sys/devices/platform/touch", "/sys/devices/platform/soc/11015000.i2c/i2c-0/0-0038", "/sys/kernel/tran_display"] {
+        if let Ok(rd) = fs::read_dir(dir) {
+            let mut names: Vec<String> = rd
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| dir != "/proc" || ["gesture", "fod", "tp", "touch", "fts", "tran", "lcm", "hbm"].iter().any(|k| n.contains(k)))
+                .collect();
+            names.sort();
+            logging::info(&format!("nodes {dir}: {}", names.join(" ")));
+        }
+    }
+}
+
+fn state() -> String {
+    fs::read_to_string(GESTURE_STATE).map(|s| s.trim().replace('\n', " | ")).unwrap_or_else(|e| format!("err {e}"))
+}
+
 fn write_node(path: &str, v: &str) -> bool {
     match fs::write(path, v) {
         Ok(_) => true,
@@ -52,7 +71,7 @@ impl IOplusTouch for TouchHal {
     }
 
     fn isTouchNodeSupport(&self, d: i32, flag: i32) -> BinderResult<i32> {
-        let s = matches!(flag, NODE_DOUBLE_TAP | NODE_DOUBLE_TAP_INDEP) as i32;
+        let s = matches!(flag, NODE_DOUBLE_TAP | NODE_DOUBLE_TAP_INDEP) as i32; // flags 8, 171 and others are logged here
         logging::info(&format!("isTouchNodeSupport dev={d} flag={flag} -> {s}"));
         Ok(s)
     }
@@ -75,7 +94,13 @@ impl IOplusTouch for TouchHal {
                 let on = info.trim() != "0";
                 Ok(if set_double_tap(on) { 0 } else { -1 })
             }
-            NODE_DOUBLE_TAP_INDEP => Ok(0),
+            NODE_DOUBLE_TAP_INDEP => {
+                // value looks like a bitmask (65537 = 0x10001); bit 0 = double tap enable
+                let mask: i64 = info.trim().parse().unwrap_or(0);
+                let ok = set_double_tap(mask & 1 != 0);
+                logging::info(&format!("flag21 mask={mask:#x} -> dt2w={} ok={ok} state=[{}]", mask & 1 != 0, state()));
+                Ok(0)
+            }
             _ => Ok(0),
         }
     }
@@ -111,7 +136,8 @@ impl IOplusTouch for TouchHal {
 fn main() {
     logging::init();
     logging::init_rsbinder_logger();
-    let _ = fs::metadata(GESTURE_STATE);
+    inventory();
+    logging::info(&format!("gesture_state at start: [{}]", state()));
     if let Err(e) = ProcessState::init_default() {
         logging::error(&format!("binder init failed: {e:?}"));
         std::process::exit(1);
