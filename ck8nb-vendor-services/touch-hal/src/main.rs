@@ -18,7 +18,30 @@ const GESTURE_STATE: &str = "/proc/gesture_state";
 const NODE_DOUBLE_TAP: i32 = 1;
 const NODE_DOUBLE_TAP_INDEP: i32 = 21;
 
-static DT2W: AtomicBool = AtomicBool::new(false);
+static DT2W: AtomicBool = AtomicBool::new(true);
+
+/// Gesture codes the tran_touch driver accepts, written as "<code><1>": cc = double tap,
+/// o0/v0/w0/m0/e0/c0/z0/s0 = drawn letters. The kernel rejects gestures that were never enabled
+/// ("this gesture has been disabled"), and the framework did not enable them on this ROM.
+const GESTURES: [&str; 9] = ["cc", "o0", "v0", "w0", "m0", "e0", "c0", "z0", "s0"];
+
+fn enable_gestures(first: bool) {
+    for g in GESTURES {
+        let cmd = format!("{g}1");
+        match fs::write(GESTURE_FN, &cmd) {
+            Ok(_) => {
+                if first {
+                    logging::info(&format!("enabled gesture {g}"));
+                }
+            }
+            Err(e) => {
+                if first {
+                    logging::error(&format!("enable gesture {g} failed: {e}"));
+                }
+            }
+        }
+    }
+}
 
 /// Log which touch/FOD related nodes exist, so unknown framework flags can be mapped from one logcat.
 fn inventory() {
@@ -164,6 +187,14 @@ fn main() {
         logging::error(&format!("binder init failed: {e:?}"));
         std::process::exit(1);
     }
+    enable_gestures(true);
+    std::thread::spawn(|| loop {
+        // the driver drops its gesture mask on suspend/resume cycles, so keep it asserted
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        if DT2W.load(Ordering::Relaxed) {
+            enable_gestures(false);
+        }
+    });
     ProcessState::start_thread_pool();
     let binder = BnOplusTouch::new_binder(TouchHal);
     match hub::add_service(SERVICE_NAME, binder.as_binder()) {
