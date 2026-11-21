@@ -35,8 +35,30 @@ fn inventory() {
     }
 }
 
+/// Read a proc/sysfs node with a raw read(). std::fs::read_to_string probes with a tiny buffer
+/// and panics when this vendor driver reports more bytes than were requested
+/// (observed: "range end index 119 out of range for slice of length 32").
+fn read_node(path: &str) -> String {
+    use std::ffi::CString;
+    let Ok(c) = CString::new(path) else { return String::new() };
+    unsafe {
+        let fd = libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        if fd < 0 {
+            return format!("err open errno={}", std::io::Error::last_os_error().raw_os_error().unwrap_or(-1));
+        }
+        let mut buf = vec![0u8; 4096];
+        let n = libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
+        libc::close(fd);
+        if n < 0 {
+            return format!("err read errno={}", std::io::Error::last_os_error().raw_os_error().unwrap_or(-1));
+        }
+        let n = (n as usize).min(buf.len());
+        String::from_utf8_lossy(&buf[..n]).trim().replace('\n', " | ")
+    }
+}
+
 fn state() -> String {
-    fs::read_to_string(GESTURE_STATE).map(|s| s.trim().replace('\n', " | ")).unwrap_or_else(|e| format!("err {e}"))
+    read_node(GESTURE_STATE)
 }
 
 fn write_node(path: &str, v: &str) -> bool {
