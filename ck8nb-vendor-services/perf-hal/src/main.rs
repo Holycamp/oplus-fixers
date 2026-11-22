@@ -2,7 +2,7 @@
 // The ROM's mediaserver (liboplusvideoboostservice) and system_server call this service. When it is
 // missing, MediaPlayer.release()/video playback blocks in AServiceManager_getService and Settings'
 // fingerprint enroll (guide video) hangs with an input ANR. Every method answers success with an
-// empty/zero value; nothing is written to the kernel.
+// empty/zero value. Only the Oplus scheduler nodes listed in put() calls are written, and only if present.
 mod bindings;
 mod logging;
 
@@ -10,6 +10,30 @@ use rsbinder::{hub, BinderResult, Interface, ProcessState};
 use bindings::{BnPerformance, IPerformance};
 
 const SERVICE_NAME: &str = "vendor.oplus.hardware.performance.IPerformance/default";
+
+/// Write a value to a kernel node only when the node exists (these are Oplus-kernel nodes; a
+/// Transsion kernel may not have them, in which case the call is a harmless no-op).
+fn put(path: &str, val: &str) {
+    if std::path::Path::new(path).exists() {
+        if let Err(e) = std::fs::write(path, val) {
+            logging::error(&format!("write {path} failed: {e}"));
+        }
+    }
+}
+
+fn inventory() {
+    let nodes = [
+        "/proc/sys/kernel/sched_assist_scene",
+        "/proc/oplus_scheduler/sched_assist/sched_impt_task",
+        "/proc/oplus_scheduler/sched_assist/ux_task",
+        "/proc/sys/walt/slide_boost_enabled",
+        "/proc/sys/walt/frame_rate",
+        "/proc/fg_info/fg_uids",
+    ];
+    for n in nodes {
+        logging::info(&format!("node {n}: {}", if std::path::Path::new(n).exists() { "present" } else { "absent" }));
+    }
+}
 
 struct Perf;
 impl Interface for Perf {}
@@ -137,13 +161,13 @@ impl IPerformance for Perf {
     fn setDamonReclaimMonitoring(&self, _sample: i32, _aggr: i32) -> BinderResult<i32> { Ok(0) }
     fn setDamonReclaimQuota(&self, _quota_ms: i32, _quota_sz: i32, _reset_interval: i32) -> BinderResult<i32> { Ok(0) }
     fn setDamonReclaimWmarks(&self, _metric: i32, _high: i32, _mid: i32, _low: i32) -> BinderResult<i32> { Ok(0) }
-    fn setFgUids(&self, _fg_uid: &str) -> BinderResult<()> { Ok(()) }
-    fn setFrameRate(&self, _frame_rate: &str) -> BinderResult<()> { Ok(()) }
+    fn setFgUids(&self, _fg_uid: &str) -> BinderResult<()> { put("/proc/fg_info/fg_uids", _fg_uid); Ok(()) }
+    fn setFrameRate(&self, _frame_rate: &str) -> BinderResult<()> { put("/proc/sys/walt/frame_rate", _frame_rate); Ok(()) }
     fn setImFlag(&self, _pid: &str, _im_flag: &str) -> BinderResult<()> { Ok(()) }
     fn setProcessReclaim(&self, _info: &str) -> BinderResult<i32> { Ok(0) }
-    fn setSchedAssistImptTask(&self, _impt_info: &str) -> BinderResult<()> { Ok(()) }
-    fn setSchedAssistScene(&self, _scene_id: &str) -> BinderResult<()> { Ok(()) }
-    fn setSlideboost(&self, _boost: &str) -> BinderResult<()> { Ok(()) }
+    fn setSchedAssistImptTask(&self, _impt_info: &str) -> BinderResult<()> { put("/proc/oplus_scheduler/sched_assist/sched_impt_task", _impt_info); Ok(()) }
+    fn setSchedAssistScene(&self, _scene_id: &str) -> BinderResult<()> { put("/proc/sys/kernel/sched_assist_scene", _scene_id); Ok(()) }
+    fn setSlideboost(&self, _boost: &str) -> BinderResult<()> { put("/proc/sys/walt/slide_boost_enabled", _boost); Ok(()) }
     fn setTpdID(&self, _param: &str) -> BinderResult<i32> { Ok(0) }
     fn setTpdSerialParams(&self, _params: &str) -> BinderResult<i32> { Ok(0) }
     fn writeClmEnable(&self, _buffer: &str) -> BinderResult<()> { Ok(()) }
@@ -198,6 +222,7 @@ fn main() {
         logging::error(&format!("binder init failed: {e:?}"));
         std::process::exit(1);
     }
+    inventory();
     ProcessState::start_thread_pool();
     let binder = BnPerformance::new_binder(Perf);
     match hub::add_service(SERVICE_NAME, binder.as_binder()) {

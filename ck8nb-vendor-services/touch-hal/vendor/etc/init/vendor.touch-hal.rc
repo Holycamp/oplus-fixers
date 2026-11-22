@@ -1,0 +1,5 @@
+service vendor.touch-hal /vendor/bin/hw/vendor.oplus.hardware.touch-service
+    class hal
+    user root
+    group system
+    interface aidl vendor.oplus.hardware.touch.IOplusTouch/default
