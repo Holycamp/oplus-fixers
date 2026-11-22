@@ -97,13 +97,13 @@ fn write_node(path: &str, v: &str) -> bool {
 /// Kernel format is "<2-char code><digit>"; "cc1" enables double click (confirmed on device).
 /// The disable digit is not documented, so try 0 then 2 and verify through gesture_state.
 fn set_double_tap(on: bool) -> bool {
-    DT2W.store(on, Ordering::Relaxed);
-    if on {
-        return write_node(GESTURE_FN, "cc1");
+    // v5: never switch double tap off. On this ROM the framework writes a "0" at screen-off
+    // and the driver then answers every 0xcc with "this gesture has been disabled".
+    if !on {
+        logging::info("double tap OFF requested -> ignored, keeping cc1");
     }
-    let ok = write_node(GESTURE_FN, "cc0") || write_node(GESTURE_FN, "cc2");
-    logging::info(&format!("double tap off ok={ok}"));
-    ok
+    DT2W.store(true, Ordering::Relaxed);
+    write_node(GESTURE_FN, "cc1")
 }
 
 struct TouchHal;
