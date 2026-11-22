@@ -13,6 +13,18 @@ use rsbinder::{hub, BinderResult, Interface, ProcessState};
 
 use bindings::{BnDisplayPanelFeature, IDisplayPanelFeature};
 
+const HBM_NODE: &str = "/sys/kernel/tran_display/lcm_hbm_state";
+
+/// id 22 is SystemUI's "FOD highlight" request (1 = on, 0 = off). Writing 1/0 to the panel node
+/// was confirmed on device: the node accepts it and reads back "0xOK" (default "0xFA").
+fn hbm(on: bool) {
+    let v = if on { "1" } else { "0" };
+    match std::fs::write(HBM_NODE, v) {
+        Ok(_) => logging::info(&format!("hbm {v} written")),
+        Err(e) => logging::error(&format!("hbm {v} write failed: {e}")),
+    }
+}
+
 const SERVICE_NAME: &str = "vendor.oplus.hardware.displaypanelfeature.IDisplayPanelFeature/default";
 
 struct Dpf;
@@ -34,6 +46,9 @@ impl IDisplayPanelFeature for Dpf {
 
     fn setDisplayPanelFeatureValue(&self, id: i32, values: &[i32]) -> BinderResult<i32> {
         logging::info(&format!("set id={id} values={values:?}"));
+        if id == 22 {
+            hbm(values.first().copied().unwrap_or(0) != 0);
+        }
         Ok(0)
     }
 
