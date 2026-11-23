@@ -59,6 +59,47 @@ impl IDisplayPanelFeature for Dpf {
     }
 }
 
+/// Goodix libgf_hal.so waits for a kernel uevent carrying "TRAN_FULL_HBM_EVENT=FULL_HBM_SET" after it
+/// turns the HBM on (strings from the library). This kernel switches the HBM but never announces it,
+/// so the HAL broadcasts the same uevent itself (netlink kobject-uevent group 1, root only).
+fn send_full_hbm_uevent() {
+    unsafe {
+        let fd = libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 15);
+        if fd < 0 {
+            logging::error(&format!("uevent socket failed: {}", std::io::Error::last_os_error()));
+            return;
+        }
+        let mut addr: libc::sockaddr_nl = std::mem::zeroed();
+        addr.nl_family = libc::AF_NETLINK as u16;
+        addr.nl_pid = 0;
+        addr.nl_groups = 1;
+        let msg: &[u8] = b"change@/devices/virtual/ck8nb/hbm\0ACTION=change\0DEVPATH=/devices/virtual/ck8nb/hbm\0SUBSYSTEM=ck8nb\0TRAN_FULL_HBM_EVENT=FULL_HBM_SET\0";
+        let r = libc::sendto(
+            fd,
+            msg.as_ptr() as *const libc::c_void,
+            msg.len(),
+            0,
+            &addr as *const libc::sockaddr_nl as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_nl>() as u32,
+        );
+        if r < 0 {
+            logging::error(&format!("uevent sendto failed: {}", std::io::Error::last_os_error()));
+        } else {
+            logging::info(&format!("sent TRAN_FULL_HBM_EVENT=FULL_HBM_SET uevent ({r} bytes)"));
+        }
+        libc::close(fd);
+    }
+}
+
+fn announce_hbm() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        send_full_hbm_uevent();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        send_full_hbm_uevent();
+    });
+}
+
 // ---- FOD press -> HBM -------------------------------------------------------------------------
 // SystemUI never asks for FOD highlight on this ROM (no featureId 22 call in the logs), so the
 // HAL does it itself: the FTS driver logs "fod finger down"/"fod finger up" to the kernel log, and
@@ -88,6 +129,10 @@ fn fod_watch() {
                         None => rec,
                     };
                     let has = |needle: &[u8]| msg.windows(needle.len()).any(|w| w == needle);
+                    if has(b"tran_lcm_hbm_store value= 1") {
+                        // someone (Goodix itself, SystemUI or this HAL) switched the HBM on: announce it
+                        announce_hbm();
+                    }
                     if has(b"fod finger down") {
                         if !lit {
                             hbm(true);
