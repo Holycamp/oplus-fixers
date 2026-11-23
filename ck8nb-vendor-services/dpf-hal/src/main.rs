@@ -7,6 +7,7 @@
 // The panel HBM for FOD is already driven by the kernel (FTS finger-down -> panel_hbm_set_cmdq),
 // so this HAL deliberately does not write brightness nodes by itself.
 mod bindings;
+mod gfpatch;
 mod logging;
 
 use rsbinder::{hub, BinderResult, Interface, ProcessState};
@@ -169,6 +170,7 @@ fn main() {
         logging::error(&format!("binder init failed: {e:?}"));
         std::process::exit(1);
     }
+    std::thread::spawn(gfpatch::run);
     std::thread::spawn(fod_watch);
     ProcessState::start_thread_pool();
     let binder = BnDisplayPanelFeature::new_binder(Dpf);
