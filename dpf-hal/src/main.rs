@@ -105,7 +105,10 @@ fn announce_hbm() {
 // SystemUI never asks for FOD highlight on this ROM (no featureId 22 call in the logs), so the
 // HAL does it itself: the FTS driver logs "fod finger down"/"fod finger up" to the kernel log, and
 // the panel HBM is switched on while the finger is on the sensor. Runs in its own thread.
+static DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn fod_watch() {
+    use std::sync::atomic::Ordering;
     use std::io::Read;
     loop {
         let mut f = match std::fs::File::open("/dev/kmsg") {
@@ -133,15 +136,30 @@ fn fod_watch() {
                     if has(b"tran_lcm_hbm_store value= 1") {
                         // someone (Goodix itself, SystemUI or this HAL) switched the HBM on: announce it
                         announce_hbm();
+                        // HBM requested with no finger on the sensor (e.g. at the start of enroll):
+                        // the icon would glow before it is touched, so drop it again unless a
+                        // finger-down record arrives right behind it.
+                        if !DOWN.load(Ordering::SeqCst) {
+                            std::thread::spawn(|| {
+                                std::thread::sleep(std::time::Duration::from_millis(150));
+                                if !DOWN.load(Ordering::SeqCst) {
+                                    hbm(false);
+                                }
+                            });
+                        }
                     }
                     if has(b"fod finger down") {
+                        DOWN.store(true, Ordering::SeqCst);
                         if !lit {
                             hbm(true);
                             lit = true;
                         }
-                    } else if has(b"fod finger up") && lit {
-                        hbm(false);
-                        lit = false;
+                    } else if has(b"fod finger up") {
+                        DOWN.store(false, Ordering::SeqCst);
+                        if lit {
+                            hbm(false);
+                            lit = false;
+                        }
                     }
                 }
                 Err(e) if e.raw_os_error() == Some(32) => continue, // EPIPE: records were overwritten
