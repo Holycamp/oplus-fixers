@@ -59,6 +59,64 @@ impl IDisplayPanelFeature for Dpf {
     }
 }
 
+// ---- FOD press -> HBM -------------------------------------------------------------------------
+// SystemUI never asks for FOD highlight on this ROM (no featureId 22 call in the logs), so the
+// HAL does it itself: the FTS driver logs "fod finger down"/"fod finger up" to the kernel log, and
+// the panel HBM is switched on while the finger is on the sensor. Runs in its own thread.
+fn fod_watch() {
+    use std::io::Read;
+    loop {
+        let mut f = match std::fs::File::open("/dev/kmsg") {
+            Ok(f) => f,
+            Err(e) => {
+                logging::error(&format!("fod watch: open /dev/kmsg failed: {e}"));
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                continue;
+            }
+        };
+        unsafe { lseek_end(&f) };
+        logging::info("fod watch running (kmsg)");
+        let mut buf = vec![0u8; 8192];
+        let mut lit = false;
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let rec = &buf[..n];
+                    let msg = match rec.iter().position(|&b| b == b';') {
+                        Some(i) => &rec[i + 1..],
+                        None => rec,
+                    };
+                    let has = |needle: &[u8]| msg.windows(needle.len()).any(|w| w == needle);
+                    if has(b"fod finger down") {
+                        if !lit {
+                            hbm(true);
+                            lit = true;
+                        }
+                    } else if has(b"fod finger up") && lit {
+                        hbm(false);
+                        lit = false;
+                    }
+                }
+                Err(e) if e.raw_os_error() == Some(32) => continue, // EPIPE: records were overwritten
+                Err(e) => {
+                    logging::error(&format!("fod watch: kmsg read error: {e}"));
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+extern "C" {
+    fn lseek(fd: i32, off: i64, whence: i32) -> i64;
+}
+unsafe fn lseek_end(f: &std::fs::File) {
+    use std::os::fd::AsRawFd;
+    lseek(f.as_raw_fd(), 0, 2);
+}
+
 fn main() {
     logging::init();
     logging::init_rsbinder_logger();
@@ -66,13 +124,17 @@ fn main() {
         logging::error(&format!("binder init failed: {e:?}"));
         std::process::exit(1);
     }
+    std::thread::spawn(fod_watch);
     ProcessState::start_thread_pool();
     let binder = BnDisplayPanelFeature::new_binder(Dpf);
     match hub::add_service(SERVICE_NAME, binder.as_binder()) {
         Ok(()) => logging::info(&format!("registered {SERVICE_NAME}")),
         Err(e) => {
-            logging::error(&format!("register failed: {e:?}"));
-            std::process::exit(1);
+            // another service (Xia's adaptor) may already own the name: keep running for the FOD watcher
+            logging::error(&format!("register failed: {e:?}; continuing without the binder service"));
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
         }
     }
     let _ = ProcessState::join_thread_pool();
