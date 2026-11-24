@@ -101,6 +101,11 @@ fn gesture_watch() {
                 Ok(0) => break,
                 Ok(n) => {
                     let rec = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    if rec.contains("GestureHandle") || rec.contains("gesture has been disabled") || rec.contains("GestureIdTranslate") {
+                        if let Some(i) = rec.find(';') {
+                            logging::info(&format!("kernel: {}", rec[i + 1..].trim()));
+                        }
+                    }
                     if let Some(i) = rec.find("g_gtp_gesture=0x") {
                         let hex: String = rec[i + 16..].chars().take_while(|c| c.is_ascii_hexdigit()).collect();
                         let code = u32::from_str_radix(&hex, 16).unwrap_or(0);
@@ -144,7 +149,19 @@ fn gesture_info() -> String {
 const GESTURES: [&str; 10] = ["cc", "fp", "o0", "v0", "w0", "m0", "e0", "c0", "z0", "s0"];
 
 fn enable_gestures(first: bool) {
+    // Only write what the driver reports as off: re-writing all codes every 5 s flooded dmesg and
+    // buried the gesture lines.
+    let st = read_node_raw(GESTURE_STATE);
     for g in GESTURES {
+        if !first {
+            let on = st.lines().any(|l| {
+                let mut it = l.split(':');
+                it.next().map(|n| n.trim()) == Some(g) && it.next().map(|v| v.trim()) == Some("1")
+            });
+            if on {
+                continue;
+            }
+        }
         let cmd = format!("{g}1");
         match fs::write(GESTURE_FN, &cmd) {
             Ok(_) => {
