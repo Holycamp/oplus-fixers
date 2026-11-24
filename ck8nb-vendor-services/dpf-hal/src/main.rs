@@ -47,9 +47,9 @@ impl IDisplayPanelFeature for Dpf {
 
     fn setDisplayPanelFeatureValue(&self, id: i32, values: &[i32]) -> BinderResult<i32> {
         logging::info(&format!("set id={id} values={values:?}"));
-        if id == 22 {
-            hbm(values.first().copied().unwrap_or(0) != 0);
-        }
+        // id 22 (FOD highlight) is deliberately NOT written to the panel: SystemUI sends it when the
+        // icon is shown, which made the panel flash before the finger was down. The panel HBM is
+        // driven by the finger-down/up watcher (fod_watch) instead.
         Ok(0)
     }
 
@@ -141,7 +141,7 @@ fn fod_watch() {
                         // finger-down record arrives right behind it.
                         if !DOWN.load(Ordering::SeqCst) {
                             std::thread::spawn(|| {
-                                std::thread::sleep(std::time::Duration::from_millis(150));
+                                std::thread::sleep(std::time::Duration::from_millis(30));
                                 if !DOWN.load(Ordering::SeqCst) {
                                     hbm(false);
                                 }
