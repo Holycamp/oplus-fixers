@@ -103,21 +103,15 @@ impl ICharger for ChargerService {
         getWirelessUserSleepMode;
         nightstandby(status: i32);
         notifyScreenStatus(status: i32);
-        setChargeEMMode(data: &str);
-        setChargerControl(data: &str);
         setChargerCoolDown(data: &str);
         setChargerCriticalLog(data: &str);
         setChargerCycle(data: &str);
         setChargerFactoryModeTest(data: &str);
         setChargerLog(data: &str);
         setChgStatusToBcc(status: i32);
-        setCustomSelectChgMode(mode: i32, enable: bool);
         setFastchgFwUpdate(data: &str);
-        setPsyMmiChgEn(data: &str);
         setPsyOtgSwitch(data: &str);
         setReserveSocDebug(data: &str);
-        setShipMode(data: &str);
-        setSmartChgMode(data: &str);
         setSmartCoolDown(coolDown: i32, normalCoolDown: i32, pkgName: &str);
         setTbattPwrOff(data: &str);
         setUisohDebugInfo(data: &str);
@@ -168,6 +162,34 @@ impl ICharger for ChargerService {
         queryRgcpHboostInfo;
         getPowerbankInfo(data: &str, typ: i32);
         setCV(cv1: i32, cv2: i32);
+    }
+
+
+    // Logged so the calls ColorOS makes for bypass charging / charge limit can be mapped from logcat
+    // (tag of this service, lines "call ...").
+    fn r#setChargerControl(&self, data: &str) -> BinderResult<i32> {
+        tracing::info!("call setChargerControl({data:?})");
+        Ok(0)
+    }
+    fn r#setCustomSelectChgMode(&self, mode: i32, enable: bool) -> BinderResult<i32> {
+        tracing::info!("call setCustomSelectChgMode({mode}, {enable})");
+        Ok(0)
+    }
+    fn r#setPsyMmiChgEn(&self, data: &str) -> BinderResult<i32> {
+        tracing::info!("call setPsyMmiChgEn({data:?})");
+        Ok(0)
+    }
+    fn r#setSmartChgMode(&self, data: &str) -> BinderResult<i32> {
+        tracing::info!("call setSmartChgMode({data:?})");
+        Ok(0)
+    }
+    fn r#setChargeEMMode(&self, data: &str) -> BinderResult<i32> {
+        tracing::info!("call setChargeEMMode({data:?})");
+        Ok(0)
+    }
+    fn r#setShipMode(&self, data: &str) -> BinderResult<i32> {
+        tracing::info!("call setShipMode({data:?})");
+        Ok(0)
     }
 
     fn r#getWirelessTXEnable(&self) -> BinderResult<String> {
@@ -405,6 +427,7 @@ impl ICharger for ChargerService {
         _caller_name: i32,
     ) -> BinderResult<i32> {
         let trimmed = extra.trim();
+        tracing::info!("call setChgConfig(flag={flag}, extra={extra:?})");
         match flag {
             5 => {
                 // Set charge limit target SOC (e.g. 80)

@@ -28,6 +28,8 @@ pub const NODE_TRAN_FAST_CHG: &str = "/sys/devices/platform/charger/fast_chg_ind
 pub const NODE_TRAN_ADC_VBUS: &str = "/sys/devices/platform/charger/ADC_Charger_Voltage";
 pub const NODE_TRAN_ADC_IBUS: &str = "/sys/devices/platform/charger/ADC_Charging_Current";
 pub const NODE_TRAN_PRIMARY_DVCHG: &str = "/sys/class/power_supply/primary_dvchg/present";
+pub const NODE_TRAN_VBUS: &str = "/sys/class/power_supply/tran-auto-test/vbus";
+pub const NODE_TRAN_IBUS: &str = "/sys/class/power_supply/tran-auto-test/ibus";
 pub const NODE_TRAN_CHG_TYPE: &str = "/sys/class/power_supply/tran-auto-test/chg_type";
 pub const NODE_TRAN_CHG_STATUS: &str = "/sys/class/power_supply/tran-auto-test/chg_status";
 
@@ -405,39 +407,31 @@ impl TranssionState {
         let is_sdp = usb_type_str.contains("[SDP]")
             || chg_type == "SDP"
             || chg_type.contains("SDP")
+            || chg_type.contains("CDP")
             || charger_type_num == 1;
 
-        // Transsion Hardware Sysfs Inspection
+        // Transsion hardware inspection. Only values that are real, live measurements of the
+        // attached source are used: the loose "indicator" nodes (fast_chg_indicator, run_path,
+        // primary_dvchg presence) read as "fast" even on a 500 mA PC port, which is what made
+        // SuperVOOC / 33W show for every cable.
         let adapter_cap = fast_read_int(NODE_TRAN_ADAPTER_CAPACITY, 0);
-        let ta_pwr = fast_read_int(NODE_TRAN_TA_POWER, 0);
-        let pump_express = fast_read_int(NODE_TRAN_PUMP_EXPRESS, 0);
-        let primary_dvchg = fast_read_int(NODE_TRAN_PRIMARY_DVCHG, 0);
-        let fast_indicator = fast_read_int(NODE_TRAN_FAST_CHG, 0);
-        let vbus_mv = fast_read_int(NODE_TRAN_ADC_VBUS, 0);
-        let ibus_ma = fast_read_int(NODE_TRAN_ADC_IBUS, 0);
-
+        let mut ta_pwr = fast_read_int(NODE_TRAN_TA_POWER, 0);
+        if ta_pwr >= 1000 {
+            ta_pwr /= 1000; // mW -> W
+        }
+        let vbus_mv = {
+            let v = fast_read_int(NODE_TRAN_ADC_VBUS, 0);
+            if v > 0 { v } else { fast_read_int(NODE_TRAN_VBUS, 0) }
+        };
+        let ibus_ma = {
+            let v = fast_read_int(NODE_TRAN_ADC_IBUS, 0);
+            if v > 0 { v } else { fast_read_int(NODE_TRAN_IBUS, 0) }
+        };
         let chg_mode = fast_read_string(NODE_TRAN_CHARGING_MODE, "");
-
-        // Hardware CC pin resistor comparator (Type-C 3.0A advertising for 15W - 100W+ fast chargers)
-        // Measured directly by analog PHY comparator with 0ms delay at pin contact
-        let cc1 = fast_read_string(NODE_TRAN_CC1_STATUS, "");
-        let cc2 = fast_read_string(NODE_TRAN_CC2_STATUS, "");
-        let is_typec_fast = cc1.contains("3_0") || cc2.contains("3_0");
-
-        // MediaTek Charger Type enum: 9 = FAST_CHARGER (PE / PE2.0 / PE5.0 / PD / Flash)
         let is_fast_charger_type = charger_type_num >= 9;
 
-        // Algorithm path inspection (RFC / PumpExpress / PD handshake)
-        let run_path = fast_read_string(NODE_TRAN_RUN_PATH, "");
-        let is_pe_algo = run_path.contains("pe50") || run_path.contains("pe20") || run_path.contains("rfc_detected");
-
-        let is_high_voltage = vbus_mv >= 8000; // 9V, 10V, 11V, 20V
-        let is_flash_hw = primary_dvchg > 0
-            || pump_express > 0
-            || fast_indicator > 0
-            || is_fast_charger_type
-            || is_typec_fast
-            || is_pe_algo
+        let is_high_voltage = vbus_mv >= 7500; // 9V, 12V, 20V (PD / PE / PPS)
+        let is_flash_hw = is_fast_charger_type
             || chg_mode.contains("fast")
             || chg_mode.contains("flash")
             || chg_type.contains("PE")
@@ -479,7 +473,6 @@ impl TranssionState {
             let is_fast_detected = detected_w >= 15
                 || is_flash_hw
                 || is_high_voltage
-                || primary_dvchg > 0
                 || prop_wattage.map(|w| w >= 15).unwrap_or(false);
 
             if is_fast_detected {
