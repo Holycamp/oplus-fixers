@@ -1,6 +1,6 @@
 [package]
 name = "dpf-hal"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "vendor.oplus.hardware.displaypanelfeature.IDisplayPanelFeature AIDL HAL for CK8nB FOD (+ press-to-HBM watcher)"

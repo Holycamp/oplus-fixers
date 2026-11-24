@@ -30,6 +30,9 @@ fn hbm(on: bool) {
 /// the HAL with feature id 22 = 1 when it shows it, 0 when it hides it). Without this gate every
 /// touch on that spot of the home screen or inside apps lit the panel.
 const ARM_MS: u64 = 30_000;
+/// True while the touch driver is in its screen-off gesture mode (screen off / AOD). SystemUI does
+/// not send the FOD "shown" signal there, but the icon is usable, so presses must be accepted.
+static SCREEN_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static ARMED_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn now_ms() -> u64 {
@@ -177,8 +180,15 @@ fn fod_watch() {
                             });
                         }
                     }
+                    if has(b"core mode change") {
+                        if has(b"--> TRAN_GESTURE_SUSPEND_MODE") {
+                            SCREEN_OFF.store(true, Ordering::SeqCst);
+                        } else if has(b"--> TRAN_ACTIVE_MODE") {
+                            SCREEN_OFF.store(false, Ordering::SeqCst);
+                        }
+                    }
                     if has(b"fod finger down") {
-                        if armed() {
+                        if armed() || SCREEN_OFF.load(Ordering::SeqCst) {
                             DOWN.store(true, Ordering::SeqCst);
                             arm(); // keep the window open while the user keeps pressing (enroll)
                             if !lit {
