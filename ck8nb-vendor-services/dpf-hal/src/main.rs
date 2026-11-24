@@ -26,6 +26,26 @@ fn hbm(on: bool) {
     }
 }
 
+/// The panel must only light for a press while SystemUI is actually showing the FOD icon (it tells
+/// the HAL with feature id 22 = 1 when it shows it, 0 when it hides it). Without this gate every
+/// touch on that spot of the home screen or inside apps lit the panel.
+const ARM_MS: u64 = 30_000;
+static ARMED_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    BASE.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
+}
+fn arm() {
+    ARMED_UNTIL.store(now_ms() + ARM_MS, std::sync::atomic::Ordering::SeqCst);
+}
+fn disarm() {
+    ARMED_UNTIL.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+fn armed() -> bool {
+    now_ms() < ARMED_UNTIL.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 const SERVICE_NAME: &str = "vendor.oplus.hardware.displaypanelfeature.IDisplayPanelFeature/default";
 
 struct Dpf;
@@ -48,8 +68,17 @@ impl IDisplayPanelFeature for Dpf {
     fn setDisplayPanelFeatureValue(&self, id: i32, values: &[i32]) -> BinderResult<i32> {
         logging::info(&format!("set id={id} values={values:?}"));
         // id 22 (FOD highlight) is deliberately NOT written to the panel: SystemUI sends it when the
-        // icon is shown, which made the panel flash before the finger was down. The panel HBM is
-        // driven by the finger-down/up watcher (fod_watch) instead.
+        // icon is shown, which made the panel flash before the finger was down. It only arms /
+        // disarms the finger-down watcher (fod_watch), which drives the panel HBM.
+        if id == 22 {
+            if values.first().copied().unwrap_or(0) != 0 {
+                arm();
+                logging::info("fod armed");
+            } else {
+                disarm();
+                logging::info("fod disarmed");
+            }
+        }
         Ok(0)
     }
 
@@ -149,10 +178,15 @@ fn fod_watch() {
                         }
                     }
                     if has(b"fod finger down") {
-                        DOWN.store(true, Ordering::SeqCst);
-                        if !lit {
-                            hbm(true);
-                            lit = true;
+                        if armed() {
+                            DOWN.store(true, Ordering::SeqCst);
+                            arm(); // keep the window open while the user keeps pressing (enroll)
+                            if !lit {
+                                hbm(true);
+                                lit = true;
+                            }
+                        } else {
+                            logging::info("fod finger down ignored (FOD not shown)");
                         }
                     } else if has(b"fod finger up") {
                         DOWN.store(false, Ordering::SeqCst);
