@@ -96,10 +96,15 @@ fn gesture_watch() {
         unsafe { libc::lseek(std::os::fd::AsRawFd::as_raw_fd(&f), 0, libc::SEEK_END) };
         logging::info("gesture watch running (kmsg)");
         let mut buf = vec![0u8; 8192];
+        let mut seen = 0u32;
         loop {
             match f.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    seen += 1;
+                    if seen <= 3 || seen % 500 == 0 {
+                        logging::info(&format!("gesture watch alive, {seen} kmsg records read"));
+                    }
                     let rec = String::from_utf8_lossy(&buf[..n]).into_owned();
                     if rec.contains("GestureHandle") || rec.contains("gesture has been disabled") || rec.contains("GestureIdTranslate") {
                         if let Some(i) = rec.find(';') {
@@ -357,6 +362,7 @@ impl IOplusTouch for TouchHal {
 fn main() {
     logging::init();
     logging::init_rsbinder_logger();
+    logging::info(concat!("touch-hal build ", env!("CARGO_PKG_VERSION")));
     inventory();
     logging::info(&format!("gesture_state at start: [{}]", state()));
     if let Err(e) = ProcessState::init_default() {
