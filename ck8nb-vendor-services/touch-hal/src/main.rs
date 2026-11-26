@@ -106,6 +106,10 @@ fn gesture_watch() {
                         logging::info(&format!("gesture watch alive, {seen} kmsg records read"));
                     }
                     let rec = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    if (rec.contains("GESTURE") || rec.contains("gesture_")) && !rec.contains("gesture_data_write") {
+                        let t: String = rec.chars().take(160).collect();
+                        logging::info(&format!("raw: {}", t.trim()));
+                    }
                     if rec.contains("GestureHandle") || rec.contains("gesture has been disabled") || rec.contains("GestureIdTranslate") {
                         if let Some(i) = rec.find(';') {
                             logging::info(&format!("kernel: {}", rec[i + 1..].trim()));
