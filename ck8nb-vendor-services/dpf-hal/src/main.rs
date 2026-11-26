@@ -126,7 +126,7 @@ fn send_full_hbm_uevent() {
 
 fn announce_hbm() {
     std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::thread::sleep(std::time::Duration::from_millis(80)); // let the panel reach full HBM before Goodix exposes
         send_full_hbm_uevent();
         std::thread::sleep(std::time::Duration::from_millis(200));
         send_full_hbm_uevent();
@@ -188,6 +188,11 @@ fn fod_watch() {
                             let new_mode = text[i + 4..].trim().to_string();
                             let off = !new_mode.contains("TRAN_ACTIVE_MODE");
                             SCREEN_OFF.store(off, Ordering::SeqCst);
+                            if !off {
+                                // screen just came on: the lock screen (with the FOD icon) is up,
+                                // even when SystemUI forgets to send the "FOD shown" signal
+                                arm();
+                            }
                             logging::info(&format!("touch mode -> {new_mode} (screen_off={off})"));
                         }
                     }
