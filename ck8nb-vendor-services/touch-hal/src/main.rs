@@ -149,19 +149,9 @@ fn gesture_info() -> String {
 const GESTURES: [&str; 10] = ["cc", "fp", "o0", "v0", "w0", "m0", "e0", "c0", "z0", "s0"];
 
 fn enable_gestures(first: bool) {
-    // Only write what the driver reports as off: re-writing all codes every 5 s flooded dmesg and
-    // buried the gesture lines.
-    let st = read_node_raw(GESTURE_STATE);
+    // Always re-write every code: the driver reports the state as on but drops the screen-off
+    // configuration at suspend, so skipping codes that "read as on" broke double-tap.
     for g in GESTURES {
-        if !first {
-            let on = st.lines().any(|l| {
-                let mut it = l.split(':');
-                it.next().map(|n| n.trim()) == Some(g) && it.next().map(|v| v.trim()) == Some("1")
-            });
-            if on {
-                continue;
-            }
-        }
         let cmd = format!("{g}1");
         match fs::write(GESTURE_FN, &cmd) {
             Ok(_) => {
