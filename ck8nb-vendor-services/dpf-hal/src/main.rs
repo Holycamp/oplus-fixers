@@ -181,10 +181,14 @@ fn fod_watch() {
                         }
                     }
                     if has(b"core mode change") {
-                        if has(b"--> TRAN_GESTURE_SUSPEND_MODE") {
-                            SCREEN_OFF.store(true, Ordering::SeqCst);
-                        } else if has(b"--> TRAN_ACTIVE_MODE") {
-                            SCREEN_OFF.store(false, Ordering::SeqCst);
+                        // "core mode change <old> --> <new>": every mode except TRAN_ACTIVE_MODE
+                        // (gesture suspend, AOD, ...) means the screen is off / dozing.
+                        let text = String::from_utf8_lossy(msg);
+                        if let Some(i) = text.find("--> ") {
+                            let new_mode = text[i + 4..].trim().to_string();
+                            let off = !new_mode.contains("TRAN_ACTIVE_MODE");
+                            SCREEN_OFF.store(off, Ordering::SeqCst);
+                            logging::info(&format!("touch mode -> {new_mode} (screen_off={off})"));
                         }
                     }
                     if has(b"fod finger down") {
@@ -196,7 +200,7 @@ fn fod_watch() {
                                 lit = true;
                             }
                         } else {
-                            logging::info("fod finger down ignored (FOD not shown)");
+                            logging::info("fod finger down ignored (FOD not shown, screen on)");
                         }
                     } else if has(b"fod finger up") {
                         DOWN.store(false, Ordering::SeqCst);
