@@ -1,6 +1,6 @@
 [package]
 name = "touch-hal"
-version = "0.8.2"
+version = "0.8.3"
 edition = "2021"
 license = "Apache-2.0"
 description = "vendor.oplus.hardware.touch.IOplusTouch V2 AIDL HAL for Transsion tran_touch (CK8nB): double-tap / screen-off gestures"

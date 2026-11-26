@@ -146,7 +146,7 @@ fn gesture_info() -> String {
 /// Gesture codes the tran_touch driver accepts, written as "<code><1>": cc = double tap,
 /// o0/v0/w0/m0/e0/c0/z0/s0 = drawn letters. The kernel rejects gestures that were never enabled
 /// ("this gesture has been disabled"), and the framework did not enable them on this ROM.
-const GESTURES: [&str; 10] = ["cc", "fp", "o0", "v0", "w0", "m0", "e0", "c0", "z0", "s0"];
+const GESTURES: [&str; 11] = ["al", "cc", "fp", "o0", "v0", "w0", "m0", "e0", "c0", "z0", "s0"];
 
 fn enable_gestures(first: bool) {
     // Always re-write every code: the driver reports the state as on but drops the screen-off
