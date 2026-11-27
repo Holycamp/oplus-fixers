@@ -34,6 +34,8 @@ const DOUBLE_TAP_INFO: &str = "1,0:0,0:0,0:0,0:0,0:0,0:0,0";
 /// gesture to Android as the same KEY_F13, so the letter is taken from its kernel log line
 /// (g_gtp_gesture=0x..) and handed to the framework through the flag-2 read.
 static LAST_GESTURE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+static GESTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CONSUMED_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// FocalTech/tran_touch letter code -> ColorOS gesture type (gestureTosString in oplus-services.jar:
 /// 1 double tap, 2 up-V, 3 down-V (the normal V), 4 <, 5 >, 6 circle (O), 7 II, 12 M, 13 W).
@@ -121,13 +123,15 @@ fn gesture_watch() {
                         match gesture_type(code) {
                             Some(t) => {
                                 let (pts, cw) = gesture_points();
-                                let info = format!("{t},{pts},{cw}");
+                                let info = if t == 1 { DOUBLE_TAP_INFO.to_string() } else { format!("{t},{pts},{cw}") };
                                 logging::info(&format!("gesture 0x{code:x} -> type {t} info={info}"));
                                 *LAST_GESTURE.lock().unwrap() = Some((Instant::now(), info));
+                                GESTURE_SEQ.fetch_add(1, Ordering::SeqCst);
                             }
                             None => {
                                 logging::info(&format!("gesture 0x{code:x} has no ColorOS type, ignored"));
                                 *LAST_GESTURE.lock().unwrap() = Some((Instant::now(), "0".to_string()));
+                                GESTURE_SEQ.fetch_add(1, Ordering::SeqCst);
                             }
                         }
                     }
@@ -144,8 +148,23 @@ fn gesture_watch() {
 }
 
 fn gesture_info() -> String {
+    // The key event reaches the framework at the same moment the kernel prints the gesture id,
+    // so the framework can ask before the kmsg watcher has parsed it: wait briefly for it.
+    let start = Instant::now();
+    loop {
+        let seq = GESTURE_SEQ.load(Ordering::SeqCst);
+        if seq != CONSUMED_SEQ.load(Ordering::SeqCst) {
+            CONSUMED_SEQ.store(seq, Ordering::SeqCst);
+            break;
+        }
+        if start.elapsed() > Duration::from_millis(400) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
     if let Some((t, s)) = LAST_GESTURE.lock().unwrap().as_ref() {
         if t.elapsed() < Duration::from_secs(3) {
+            logging::info(&format!("flag2 -> {s} (waited {} ms)", start.elapsed().as_millis()));
             return s.clone();
         }
     }
