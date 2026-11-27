@@ -197,7 +197,11 @@ fn fod_watch() {
                         }
                     }
                     if has(b"fod finger down") {
-                        if armed() || SCREEN_OFF.load(Ordering::SeqCst) {
+                        if SCREEN_OFF.load(Ordering::SeqCst) {
+                            // AOD/screen off: the panel only lights through a drawn spot (SystemUI);
+                            // the display driver refuses the HBM node here, so do not touch anything.
+                            logging::info("fod finger down while screen off: left to SystemUI");
+                        } else if armed() {
                             DOWN.store(true, Ordering::SeqCst);
                             arm(); // keep the window open while the user keeps pressing (enroll)
                             if !lit {
