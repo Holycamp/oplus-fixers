@@ -1,23 +1,16 @@
 // IDisplayPanelFeature V1 HAL for Tecno CK8nB (Transsion panel, MTK).
-// SystemUI / FingerprintService call get/setDisplayPanelFeatureValue with numeric feature ids
-// during FOD enroll and unlock. The stock service answered them; with no service the calls fail
-// and fingerprint enroll hangs. This one answers success with value 0 and logs each id
-// (tag OplusDpfHal) so the ones FOD needs can be mapped from logcat.
-//
-// The panel HBM for FOD is already driven by the kernel (FTS finger-down -> panel_hbm_set_cmdq),
-// so this HAL deliberately does not write brightness nodes by itself.
+// Preserves full rsbinder bindings, gfpatch (in-memory libgf_hal.so patch), and screen-on FOD gate,
+// plus adds pure-HAL screen-off/AOD FOD wake via /dev/uinput KEY_WAKEUP (fod_wake.rs).
 mod bindings;
+mod fod_wake;
 mod gfpatch;
 mod logging;
 
 use rsbinder::{hub, BinderResult, Interface, ProcessState};
-
 use bindings::{BnDisplayPanelFeature, IDisplayPanelFeature};
 
 const HBM_NODE: &str = "/sys/kernel/tran_display/lcm_hbm_state";
 
-/// id 22 is SystemUI's "FOD highlight" request (1 = on, 0 = off). Writing 1/0 to the panel node
-/// was confirmed on device: the node accepts it and reads back "0xOK" (default "0xFA").
 fn hbm(on: bool) {
     let v = if on { "1" } else { "0" };
     match std::fs::write(HBM_NODE, v) {
@@ -26,12 +19,7 @@ fn hbm(on: bool) {
     }
 }
 
-/// The panel must only light for a press while SystemUI is actually showing the FOD icon (it tells
-/// the HAL with feature id 22 = 1 when it shows it, 0 when it hides it). Without this gate every
-/// touch on that spot of the home screen or inside apps lit the panel.
 const ARM_MS: u64 = 30_000;
-/// True while the touch driver is in its screen-off gesture mode (screen off / AOD). SystemUI does
-/// not send the FOD "shown" signal there, but the icon is usable, so presses must be accepted.
 static SCREEN_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static ARMED_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -55,8 +43,6 @@ struct Dpf;
 impl Interface for Dpf {}
 
 impl IDisplayPanelFeature for Dpf {
-    // The ROM's framework declares `out int[]` (it sends only the array length), not the `inout`
-    // of the LineageOS V1 snapshot, so the AIDL in this crate uses `out`.
     fn getDisplayPanelFeatureValue(&self, id: i32, values: &mut Vec<i32>) -> BinderResult<i32> {
         logging::info(&format!("get id={id} len={}", values.len()));
         if values.is_empty() {
@@ -70,9 +56,6 @@ impl IDisplayPanelFeature for Dpf {
 
     fn setDisplayPanelFeatureValue(&self, id: i32, values: &[i32]) -> BinderResult<i32> {
         logging::info(&format!("set id={id} values={values:?}"));
-        // id 22 (FOD highlight) is deliberately NOT written to the panel: SystemUI sends it when the
-        // icon is shown, which made the panel flash before the finger was down. It only arms /
-        // disarms the finger-down watcher (fod_watch), which drives the panel HBM.
         if id == 22 {
             if values.first().copied().unwrap_or(0) != 0 {
                 arm();
@@ -92,9 +75,6 @@ impl IDisplayPanelFeature for Dpf {
     }
 }
 
-/// Goodix libgf_hal.so waits for a kernel uevent carrying "TRAN_FULL_HBM_EVENT=FULL_HBM_SET" after it
-/// turns the HBM on (strings from the library). This kernel switches the HBM but never announces it,
-/// so the HAL broadcasts the same uevent itself (netlink kobject-uevent group 1, root only).
 fn send_full_hbm_uevent() {
     unsafe {
         let fd = libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 15);
@@ -126,18 +106,15 @@ fn send_full_hbm_uevent() {
 
 fn announce_hbm() {
     std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_millis(80)); // let the panel reach full HBM before Goodix exposes
+        std::thread::sleep(std::time::Duration::from_millis(80));
         send_full_hbm_uevent();
         std::thread::sleep(std::time::Duration::from_millis(200));
         send_full_hbm_uevent();
     });
 }
 
-// ---- FOD press -> HBM -------------------------------------------------------------------------
-// SystemUI never asks for FOD highlight on this ROM (no featureId 22 call in the logs), so the
-// HAL does it itself: the FTS driver logs "fod finger down"/"fod finger up" to the kernel log, and
-// the panel HBM is switched on while the finger is on the sensor. Runs in its own thread.
 static DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn fod_watch() {
     use std::sync::atomic::Ordering;
@@ -154,7 +131,6 @@ fn fod_watch() {
         unsafe { lseek_end(&f) };
         logging::info("fod watch running (kmsg)");
         let mut buf = vec![0u8; 8192];
-        let mut lit = false;
         loop {
             match f.read(&mut buf) {
                 Ok(0) => break,
@@ -166,11 +142,7 @@ fn fod_watch() {
                     };
                     let has = |needle: &[u8]| msg.windows(needle.len()).any(|w| w == needle);
                     if has(b"tran_lcm_hbm_store value= 1") {
-                        // someone (Goodix itself, SystemUI or this HAL) switched the HBM on: announce it
                         announce_hbm();
-                        // HBM requested with no finger on the sensor (e.g. at the start of enroll):
-                        // the icon would glow before it is touched, so drop it again unless a
-                        // finger-down record arrives right behind it.
                         if !DOWN.load(Ordering::SeqCst) {
                             std::thread::spawn(|| {
                                 std::thread::sleep(std::time::Duration::from_millis(30));
@@ -181,16 +153,12 @@ fn fod_watch() {
                         }
                     }
                     if has(b"core mode change") {
-                        // "core mode change <old> --> <new>": every mode except TRAN_ACTIVE_MODE
-                        // (gesture suspend, AOD, ...) means the screen is off / dozing.
                         let text = String::from_utf8_lossy(msg);
                         if let Some(i) = text.find("--> ") {
                             let new_mode = text[i + 4..].trim().to_string();
                             let off = !new_mode.contains("TRAN_ACTIVE_MODE");
                             SCREEN_OFF.store(off, Ordering::SeqCst);
                             if !off {
-                                // screen just came on: the lock screen (with the FOD icon) is up,
-                                // even when SystemUI forgets to send the "FOD shown" signal
                                 arm();
                             }
                             logging::info(&format!("touch mode -> {new_mode} (screen_off={off})"));
@@ -198,28 +166,35 @@ fn fod_watch() {
                     }
                     if has(b"fod finger down") {
                         if SCREEN_OFF.load(Ordering::SeqCst) {
-                            // AOD/screen off: the panel only lights through a drawn spot (SystemUI);
-                            // the display driver refuses the HBM node here, so do not touch anything.
-                            logging::info("fod finger down while screen off: left to SystemUI");
+                            // Pure-HAL SOFOD: wake panel out of DOZE via /dev/uinput KEY_WAKEUP,
+                            // then write lcm_hbm_state=1 once nt37703 enters active state.
+                            DOWN.store(true, Ordering::SeqCst);
+                            arm();
+                            logging::info("fod finger down while screen off -> waking panel via uinput");
+                            std::thread::spawn(|| {
+                                fod_wake::wake_panel_for_sofod();
+                                if DOWN.load(Ordering::SeqCst) {
+                                    hbm(true);
+                                    LIT.store(true, Ordering::SeqCst);
+                                }
+                            });
                         } else if armed() {
                             DOWN.store(true, Ordering::SeqCst);
-                            arm(); // keep the window open while the user keeps pressing (enroll)
-                            if !lit {
+                            arm();
+                            if !LIT.swap(true, Ordering::SeqCst) {
                                 hbm(true);
-                                lit = true;
                             }
                         } else {
                             logging::info("fod finger down ignored (FOD not shown, screen on)");
                         }
                     } else if has(b"fod finger up") {
                         DOWN.store(false, Ordering::SeqCst);
-                        if lit {
+                        if LIT.swap(false, Ordering::SeqCst) {
                             hbm(false);
-                            lit = false;
                         }
                     }
                 }
-                Err(e) if e.raw_os_error() == Some(32) => continue, // EPIPE: records were overwritten
+                Err(e) if e.raw_os_error() == Some(32) => continue,
                 Err(e) => {
                     logging::error(&format!("fod watch: kmsg read error: {e}"));
                     break;
@@ -252,7 +227,6 @@ fn main() {
     match hub::add_service(SERVICE_NAME, binder.as_binder()) {
         Ok(()) => logging::info(&format!("registered {SERVICE_NAME}")),
         Err(e) => {
-            // another service (Xia's adaptor) may already own the name: keep running for the FOD watcher
             logging::error(&format!("register failed: {e:?}; continuing without the binder service"));
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(3600));

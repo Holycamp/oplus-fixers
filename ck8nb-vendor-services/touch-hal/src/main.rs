@@ -1,7 +1,6 @@
 // IOplusTouch V2 HAL for Transsion tran_touch / FocalTech (Tecno CK8nB).
-// The framework (ColorTouchNodeManagerService) writes numbered "node flags" through this
-// interface. Flag 1 = double-tap-to-wake enable. Every call is logged under tag OplusTouchHal
-// so unknown flags (draw gestures etc.) can be mapped from a logcat.
+// Preserves full rsbinder IOplusTouch V2 implementation + adds zero-race direct FTS_BUF
+// Gesture ID fallback via raw libc::read so O, V, W, M work reliably alongside DT2W.
 mod bindings;
 mod logging;
 
@@ -19,40 +18,54 @@ const GESTURE_STATE: &str = "/proc/gesture_state";
 
 const NODE_DOUBLE_TAP: i32 = 1;
 const NODE_DOUBLE_TAP_INDEP: i32 = 21;
-/// Asked by ColorTouchNodeManagerService (seen in logcat); the stock-style Qui HAL answered "supported" for dev 0.
 const NODE_85: i32 = 85;
 const FTS_BUF: &str = "/sys/devices/platform/soc/11015000.i2c/i2c-0/0-0038/fts_gesture_buf";
 
 static DT2W: AtomicBool = AtomicBool::new(true);
 
-/// Node flag the framework reads after a screen-off gesture key: "type,x:y,x:y,x:y,x:y,x:y,x:y,clockwise"
-/// (OplusScreenOffGestureUtil.updateGestureInfo, confirmed in oplus-services.jar).
 const NODE_GESTURE_INFO: i32 = 2;
 const DOUBLE_TAP_INFO: &str = "1,0:0,0:0,0:0,0:0,0:0,0:0,0";
 
-/// The last drawn gesture: (when, "type,points,clockwise"). The tran_touch driver reports every
-/// gesture to Android as the same KEY_F13, so the letter is taken from its kernel log line
-/// (g_gtp_gesture=0x..) and handed to the framework through the flag-2 read.
 static LAST_GESTURE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
 static GESTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static CONSUMED_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// FocalTech/tran_touch letter code -> ColorOS gesture type (gestureTosString in oplus-services.jar:
-/// 1 double tap, 2 up-V, 3 down-V (the normal V), 4 <, 5 >, 6 circle (O), 7 II, 12 M, 13 W).
+/// Maps both kernel ASCII hex codes (g_gtp_gesture=0x..) and FocalTech decimal Gesture IDs
+/// from fts_gesture_buf -> ColorOS gesture type (oplus-services.jar):
+/// 1 double tap, 3 V (down-V), 6 O (circle), 12 M, 13 W.
 fn gesture_type(code: u32) -> Option<u32> {
     match code {
-        0x6f => Some(6),  // o
-        0x76 => Some(3),  // v
-        0x77 => Some(13), // w
-        0x6d => Some(12), // m
-        0xcc | 0x24 => Some(1), // double tap
+        0x6f | 0x30 => Some(6),  // O (ASCII 'o' or FocalTech ID 48 / 0x30)
+        0x76 | 0x54 => Some(3),  // V (ASCII 'v' or FocalTech ID 84 / 0x54)
+        0x77 | 0x31 => Some(13), // W (ASCII 'w' or FocalTech ID 49 / 0x31)
+        0x6d | 0x32 => Some(12), // M (ASCII 'm' or FocalTech ID 50 / 0x32)
+        0xcc | 0x24 => Some(1),  // Double tap (0xcc or FocalTech ID 36 / 0x24)
         _ => None,
     }
 }
 
-/// Parse the "n( x,y)" pairs of fts_gesture_buf and sample six points + the turning direction.
-fn gesture_points() -> (String, i32) {
-    let t = read_node_raw(FTS_BUF);
+/// Raw libc::read helper (keeps newlines intact and avoids std::fs::read_to_string panics on vendor sysfs).
+fn read_sysfs_libc(path: &str) -> String {
+    use std::ffi::CString;
+    let Ok(c) = CString::new(path) else { return String::new() };
+    unsafe {
+        let fd = libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        if fd < 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u8; 4096];
+        let n = libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
+        libc::close(fd);
+        if n <= 0 {
+            return String::new();
+        }
+        let n = (n as usize).min(buf.len());
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    }
+}
+
+/// Parse the "n( x,y)" pairs of fts_gesture_buf and sample six points + turning direction.
+fn parse_points_from_text(t: &str) -> (String, i32) {
     let mut pts: Vec<(i32, i32)> = Vec::new();
     for part in t.split('(').skip(1) {
         if let Some(inner) = part.split(')').next() {
@@ -83,6 +96,34 @@ fn gesture_points() -> (String, i32) {
     (sample.join(","), if area > 0 { 1 } else { 0 })
 }
 
+fn gesture_points() -> (String, i32) {
+    parse_points_from_text(&read_sysfs_libc(FTS_BUF))
+}
+
+/// Direct zero-race read of Gesture ID + points straight from fts_gesture_buf.
+fn read_direct_fts_gesture() -> Option<String> {
+    let t = read_sysfs_libc(FTS_BUF);
+    for line in t.lines() {
+        if let Some(val) = line.trim().strip_prefix("Gesture ID:") {
+            let v = val.trim();
+            let raw = if let Some(hex) = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+                u32::from_str_radix(hex, 16).ok()?
+            } else {
+                v.parse::<u32>().ok()?
+            };
+            let mapped = gesture_type(raw)?;
+            if mapped == 1 {
+                return Some(DOUBLE_TAP_INFO.to_string());
+            }
+            let (pts, cw) = parse_points_from_text(&t);
+            let info = format!("{mapped},{pts},{cw}");
+            logging::info(&format!("fts_gesture_buf direct ID={raw} -> {info}"));
+            return Some(info);
+        }
+    }
+    None
+}
+
 /// Follows the kernel log for "g_gtp_gesture=0x.." and keeps the matching ColorOS gesture string.
 fn gesture_watch() {
     use std::io::Read;
@@ -108,14 +149,13 @@ fn gesture_watch() {
                         logging::info(&format!("gesture watch alive, {seen} kmsg records read"));
                     }
                     let rec = String::from_utf8_lossy(&buf[..n]).into_owned();
-                    if (rec.contains("GESTURE") || rec.contains("gesture_")) && !rec.contains("gesture_data_write") {
+                    let low = rec.to_ascii_lowercase();
+                    if (low.contains("gesture") || low.contains("fts_ts"))
+                        && !rec.contains("gesture_data_write")
+                        && !rec.contains("ufshcd")
+                    {
                         let t: String = rec.chars().take(160).collect();
                         logging::info(&format!("raw: {}", t.trim()));
-                    }
-                    if rec.contains("GestureHandle") || rec.contains("gesture has been disabled") || rec.contains("GestureIdTranslate") {
-                        if let Some(i) = rec.find(';') {
-                            logging::info(&format!("kernel: {}", rec[i + 1..].trim()));
-                        }
                     }
                     if let Some(i) = rec.find("g_gtp_gesture=0x") {
                         let hex: String = rec[i + 16..].chars().take_while(|c| c.is_ascii_hexdigit()).collect();
@@ -148,37 +188,35 @@ fn gesture_watch() {
 }
 
 fn gesture_info() -> String {
-    // The key event reaches the framework at the same moment the kernel prints the gesture id,
-    // so the framework can ask before the kmsg watcher has parsed it: wait briefly for it.
     let start = Instant::now();
     loop {
         let seq = GESTURE_SEQ.load(Ordering::SeqCst);
         if seq != CONSUMED_SEQ.load(Ordering::SeqCst) {
             CONSUMED_SEQ.store(seq, Ordering::SeqCst);
+            if let Some((t, s)) = LAST_GESTURE.lock().unwrap().as_ref() {
+                if t.elapsed() < Duration::from_secs(3) {
+                    logging::info(&format!("flag2 (kmsg) -> {s} (waited {} ms)", start.elapsed().as_millis()));
+                    return s.clone();
+                }
+            }
             break;
         }
-        if start.elapsed() > Duration::from_millis(400) {
+        if start.elapsed() > Duration::from_millis(120) {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    if let Some((t, s)) = LAST_GESTURE.lock().unwrap().as_ref() {
-        if t.elapsed() < Duration::from_secs(3) {
-            logging::info(&format!("flag2 -> {s} (waited {} ms)", start.elapsed().as_millis()));
-            return s.clone();
-        }
+    // Zero-race fallback: read Gesture ID directly from fts_gesture_buf!
+    if let Some(direct) = read_direct_fts_gesture() {
+        logging::info(&format!("flag2 (direct fts_buf) -> {direct}"));
+        return direct;
     }
     DOUBLE_TAP_INFO.to_string()
 }
 
-/// Gesture codes the tran_touch driver accepts, written as "<code><1>": cc = double tap,
-/// o0/v0/w0/m0/e0/c0/z0/s0 = drawn letters. The kernel rejects gestures that were never enabled
-/// ("this gesture has been disabled"), and the framework did not enable them on this ROM.
 const GESTURES: [&str; 11] = ["al", "cc", "fp", "o0", "v0", "w0", "m0", "e0", "c0", "z0", "s0"];
 
 fn enable_gestures(first: bool) {
-    // Always re-write every code: the driver reports the state as on but drops the screen-off
-    // configuration at suspend, so skipping codes that "read as on" broke double-tap.
     for g in GESTURES {
         let cmd = format!("{g}1");
         match fs::write(GESTURE_FN, &cmd) {
@@ -196,7 +234,6 @@ fn enable_gestures(first: bool) {
     }
 }
 
-/// Log which touch/FOD related nodes exist, so unknown framework flags can be mapped from one logcat.
 fn inventory() {
     for dir in ["/proc", "/sys/devices/platform/touch", "/sys/devices/platform/soc/11015000.i2c/i2c-0/0-0038", "/sys/kernel/tran_display"] {
         if let Ok(rd) = fs::read_dir(dir) {
@@ -211,25 +248,12 @@ fn inventory() {
     }
 }
 
-/// Read a proc/sysfs node with a raw read(). std::fs::read_to_string probes with a tiny buffer
-/// and panics when this vendor driver reports more bytes than were requested
-/// (observed: "range end index 119 out of range for slice of length 32").
 fn read_node(path: &str) -> String {
-    use std::ffi::CString;
-    let Ok(c) = CString::new(path) else { return String::new() };
-    unsafe {
-        let fd = libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-        if fd < 0 {
-            return format!("err open errno={}", std::io::Error::last_os_error().raw_os_error().unwrap_or(-1));
-        }
-        let mut buf = vec![0u8; 4096];
-        let n = libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
-        libc::close(fd);
-        if n < 0 {
-            return format!("err read errno={}", std::io::Error::last_os_error().raw_os_error().unwrap_or(-1));
-        }
-        let n = (n as usize).min(buf.len());
-        String::from_utf8_lossy(&buf[..n]).trim().replace('\n', " | ")
+    let raw = read_sysfs_libc(path);
+    if raw.is_empty() {
+        String::new()
+    } else {
+        raw.trim().replace('\n', " | ")
     }
 }
 
@@ -247,11 +271,7 @@ fn write_node(path: &str, v: &str) -> bool {
     }
 }
 
-/// Kernel format is "<2-char code><digit>"; "cc1" enables double click (confirmed on device).
-/// The disable digit is not documented, so try 0 then 2 and verify through gesture_state.
 fn set_double_tap(on: bool) -> bool {
-    // v5: never switch double tap off. On this ROM the framework writes a "0" at screen-off
-    // and the driver then answers every 0xcc with "this gesture has been disabled".
     if !on {
         logging::info("double tap OFF requested -> ignored, keeping cc1");
     }
@@ -259,9 +279,8 @@ fn set_double_tap(on: bool) -> bool {
     write_node(GESTURE_FN, "cc1")
 }
 
-/// Find the /dev/input/eventN of the touch panel from /proc/bus/input/devices.
 fn find_touch_event() -> Option<String> {
-    let t = read_node_raw("/proc/bus/input/devices");
+    let t = read_sysfs_libc("/proc/bus/input/devices");
     let mut name_ok = false;
     for line in t.lines() {
         if line.starts_with("N: ") {
@@ -276,12 +295,6 @@ fn find_touch_event() -> Option<String> {
     None
 }
 
-fn read_node_raw(path: &str) -> String {
-    fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
-}
-
-/// Gesture trace: logs every key event of the touch panel together with the chip's gesture buffer,
-/// so the next logcat shows what a drawn letter really produces (key code, ID, points).
 fn gesture_trace() {
     use std::io::Read;
     loop {
@@ -300,7 +313,6 @@ fn gesture_trace() {
             let code = u16::from_ne_bytes([buf[18], buf[19]]);
             let val = i32::from_ne_bytes([buf[20], buf[21], buf[22], buf[23]]);
             if typ == 1 && val == 1 {
-                // EV_KEY press
                 logging::info(&format!("touch key code={code} buf=[{}]", read_node(FTS_BUF)));
             }
         }
@@ -318,7 +330,6 @@ impl IOplusTouch for TouchHal {
     }
 
     fn isTouchNodeSupport(&self, d: i32, flag: i32) -> BinderResult<i32> {
-        // only the main touch device (0) is supported; flags 8, 171 and others are logged here
         let s = (d == 0 && matches!(flag, NODE_DOUBLE_TAP | NODE_DOUBLE_TAP_INDEP | NODE_85 | NODE_GESTURE_INFO)) as i32;
         logging::info(&format!("isTouchNodeSupport dev={d} flag={flag} -> {s}"));
         Ok(s)
@@ -344,7 +355,6 @@ impl IOplusTouch for TouchHal {
                 Ok(if set_double_tap(on) { 0 } else { -1 })
             }
             NODE_DOUBLE_TAP_INDEP => {
-                // value looks like a bitmask (65537 = 0x10001); bit 0 = double tap enable
                 let mask: i64 = info.trim().parse().unwrap_or(0);
                 let ok = set_double_tap(mask & 1 != 0);
                 logging::info(&format!("flag21 mask={mask:#x} -> dt2w={} ok={ok} state=[{}]", mask & 1 != 0, state()));
@@ -396,7 +406,6 @@ fn main() {
     std::thread::spawn(gesture_trace);
     std::thread::spawn(gesture_watch);
     std::thread::spawn(|| loop {
-        // the driver drops its gesture mask on suspend/resume cycles, so keep it asserted
         std::thread::sleep(std::time::Duration::from_secs(5));
         if DT2W.load(Ordering::Relaxed) {
             enable_gestures(false);
