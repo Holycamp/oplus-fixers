@@ -8,8 +8,8 @@ name = "ck8nb-face-hal"
 path = "src/main.rs"
 
 [dependencies]
-rsbinder = "0.5"
+rsbinder = "0.13"
 libc = "0.2"
 
 [build-dependencies]
-rsbinder-aidl = "0.5"
+rsbinder-aidl = "0.13"
