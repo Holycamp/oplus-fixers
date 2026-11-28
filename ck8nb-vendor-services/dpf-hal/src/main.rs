@@ -1,6 +1,10 @@
-// IDisplayPanelFeature V1 HAL for Tecno CK8nB (Transsion panel, MTK).
-// Preserves full rsbinder bindings, gfpatch (in-memory libgf_hal.so patch), and screen-on FOD gate,
-// plus fixes pure-HAL screen-off/AOD FOD timing by waiting for TRAN_ACTIVE_MODE before HBM.
+// IDisplayPanelFeature V1 HAL for Tecno CK8nB (Transsion NT37703 DSI video-mode panel, MTK).
+// Preserves full rsbinder bindings, gfpatch (in-memory libgf_hal.so patch), and working
+// lockscreen + screen-off/AOD FOD timing.
+// Added from stock vendor.oplus.hardware.displaypanelfeature-service disassembly:
+//   - ID 217 (GetDisplayLongruiAOD) -> 13 (0b1101: Panoramic/Full-Screen + All-Day + Keep-on-entry, LTPO bit off)
+//   - ID 193 (GetDisplayPanelVideo) -> 1  (DSI video-mode ramless panel)
+//   - Fast /dev/kmsg early-skip for gesture_data_write flood to cut CPU wakeups.
 mod bindings;
 mod fod_wake;
 mod gfpatch;
@@ -44,12 +48,22 @@ impl Interface for Dpf {}
 
 impl IDisplayPanelFeature for Dpf {
     fn getDisplayPanelFeatureValue(&self, id: i32, values: &mut Vec<i32>) -> BinderResult<i32> {
-        logging::info(&format!("get id={id} len={}", values.len()));
+        let reply = match id {
+            // GetDisplayLongruiAOD: 13 (0b1101) = Panoramic/Full-Screen + All-Day + Keep-on-entry;
+            // bit 1 (LTPO hardware smooth-switch) stays 0 for non-LTPO panels.
+            217 => 13,
+            // GetDisplayPanelVideo: 1 = DSI video-mode panel (nt37703_fhdp_dsi_vdo).
+            193 => 1,
+            _ => 0,
+        };
+        logging::info(&format!("get id={id} len={} -> [{reply}]", values.len()));
         if values.is_empty() {
-            values.push(0);
-        }
-        for v in values.iter_mut() {
-            *v = 0;
+            values.push(reply);
+        } else {
+            for v in values.iter_mut() {
+                *v = 0;
+            }
+            values[0] = reply;
         }
         Ok(0)
     }
@@ -117,6 +131,14 @@ static DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(
 static LIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static WAKE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[inline]
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 fn fod_watch() {
     use std::sync::atomic::Ordering;
     use std::io::Read;
@@ -141,9 +163,18 @@ fn fod_watch() {
                         Some(i) => &rec[i + 1..],
                         None => rec,
                     };
-                    let has = |needle: &[u8]| msg.windows(needle.len()).any(|w| w == needle);
-                    if has(b"skip set hbm node") {
-                        // Display wasn't quite awake yet: clear LIT and retry shortly if finger is still down
+                    // Fast reject: ignore the high-rate gesture_data_write flood and unrelated lines.
+                    if msg.len() < 12 || contains_bytes(msg, b"gesture_data_write") {
+                        continue;
+                    }
+                    let is_hbm = contains_bytes(msg, b"hbm");
+                    let is_fod = contains_bytes(msg, b"fod finger ");
+                    let is_mode = contains_bytes(msg, b"core mode change");
+                    if !is_hbm && !is_fod && !is_mode {
+                        continue;
+                    }
+
+                    if is_hbm && contains_bytes(msg, b"skip set hbm node") {
                         LIT.store(false, Ordering::SeqCst);
                         if DOWN.load(Ordering::SeqCst) {
                             logging::info("hbm skipped by panel -> retrying in 60ms");
@@ -154,8 +185,7 @@ fn fod_watch() {
                                 }
                             });
                         }
-                    }
-                    if has(b"tran_lcm_hbm_store value= 1") {
+                    } else if is_hbm && contains_bytes(msg, b"tran_lcm_hbm_store value= 1") {
                         announce_hbm();
                         if !DOWN.load(Ordering::SeqCst) {
                             std::thread::spawn(|| {
@@ -166,7 +196,8 @@ fn fod_watch() {
                             });
                         }
                     }
-                    if has(b"core mode change") {
+
+                    if is_mode {
                         let text = String::from_utf8_lossy(msg);
                         if let Some(i) = text.find("--> ") {
                             let new_mode = text[i + 4..].trim().to_string();
@@ -178,7 +209,8 @@ fn fod_watch() {
                             logging::info(&format!("touch mode -> {new_mode} (screen_off={off})"));
                         }
                     }
-                    if has(b"fod finger down") {
+
+                    if is_fod && contains_bytes(msg, b"fod finger down") {
                         if SCREEN_OFF.load(Ordering::SeqCst) {
                             DOWN.store(true, Ordering::SeqCst);
                             arm();
@@ -186,14 +218,12 @@ fn fod_watch() {
                                 logging::info("fod finger down while screen off -> waking panel via uinput");
                                 std::thread::spawn(|| {
                                     fod_wake::inject_wakeup();
-                                    // Wait up to 400ms for TRAN_ACTIVE_MODE (SCREEN_OFF == false)
                                     for _ in 0..40 {
                                         if !SCREEN_OFF.load(Ordering::SeqCst) {
                                             break;
                                         }
                                         std::thread::sleep(std::time::Duration::from_millis(10));
                                     }
-                                    // Give nt37703 DSI 50ms to finish entering active state before HBM
                                     std::thread::sleep(std::time::Duration::from_millis(50));
                                     WAKE_PENDING.store(false, Ordering::SeqCst);
                                     if DOWN.load(Ordering::SeqCst) && !LIT.swap(true, Ordering::SeqCst) {
@@ -210,7 +240,7 @@ fn fod_watch() {
                         } else {
                             logging::info("fod finger down ignored (FOD not shown, screen on)");
                         }
-                    } else if has(b"fod finger up") {
+                    } else if is_fod && contains_bytes(msg, b"fod finger up") {
                         DOWN.store(false, Ordering::SeqCst);
                         if LIT.swap(false, Ordering::SeqCst) {
                             hbm(false);
