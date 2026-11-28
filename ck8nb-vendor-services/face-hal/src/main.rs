@@ -402,7 +402,7 @@ impl IFace for FaceHal {
         log_info("IFace::getSensorProps");
         Ok(vec![SensorProps {
             commonProps: CommonProps {
-                sensorId: 0,
+                sensorId: 1,
                 sensorStrength: SensorStrength::CONVENIENCE,
                 maxEnrollmentsPerUser: 1,
                 componentInfo: Vec::new(),
