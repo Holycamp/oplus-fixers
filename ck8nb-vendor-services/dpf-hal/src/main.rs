@@ -1,6 +1,6 @@
 // IDisplayPanelFeature V1 HAL for Tecno CK8nB (Transsion panel, MTK).
 // Preserves full rsbinder bindings, gfpatch (in-memory libgf_hal.so patch), and screen-on FOD gate,
-// plus adds pure-HAL screen-off/AOD FOD wake via /dev/uinput KEY_WAKEUP (fod_wake.rs).
+// plus fixes pure-HAL screen-off/AOD FOD timing by waiting for TRAN_ACTIVE_MODE before HBM.
 mod bindings;
 mod fod_wake;
 mod gfpatch;
@@ -115,6 +115,7 @@ fn announce_hbm() {
 
 static DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WAKE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn fod_watch() {
     use std::sync::atomic::Ordering;
@@ -141,6 +142,19 @@ fn fod_watch() {
                         None => rec,
                     };
                     let has = |needle: &[u8]| msg.windows(needle.len()).any(|w| w == needle);
+                    if has(b"skip set hbm node") {
+                        // Display wasn't quite awake yet: clear LIT and retry shortly if finger is still down
+                        LIT.store(false, Ordering::SeqCst);
+                        if DOWN.load(Ordering::SeqCst) {
+                            logging::info("hbm skipped by panel -> retrying in 60ms");
+                            std::thread::spawn(|| {
+                                std::thread::sleep(std::time::Duration::from_millis(60));
+                                if DOWN.load(Ordering::SeqCst) && !LIT.swap(true, Ordering::SeqCst) {
+                                    hbm(true);
+                                }
+                            });
+                        }
+                    }
                     if has(b"tran_lcm_hbm_store value= 1") {
                         announce_hbm();
                         if !DOWN.load(Ordering::SeqCst) {
@@ -166,18 +180,27 @@ fn fod_watch() {
                     }
                     if has(b"fod finger down") {
                         if SCREEN_OFF.load(Ordering::SeqCst) {
-                            // Pure-HAL SOFOD: wake panel out of DOZE via /dev/uinput KEY_WAKEUP,
-                            // then write lcm_hbm_state=1 once nt37703 enters active state.
                             DOWN.store(true, Ordering::SeqCst);
                             arm();
-                            logging::info("fod finger down while screen off -> waking panel via uinput");
-                            std::thread::spawn(|| {
-                                fod_wake::wake_panel_for_sofod();
-                                if DOWN.load(Ordering::SeqCst) {
-                                    hbm(true);
-                                    LIT.store(true, Ordering::SeqCst);
-                                }
-                            });
+                            if !WAKE_PENDING.swap(true, Ordering::SeqCst) {
+                                logging::info("fod finger down while screen off -> waking panel via uinput");
+                                std::thread::spawn(|| {
+                                    fod_wake::inject_wakeup();
+                                    // Wait up to 400ms for TRAN_ACTIVE_MODE (SCREEN_OFF == false)
+                                    for _ in 0..40 {
+                                        if !SCREEN_OFF.load(Ordering::SeqCst) {
+                                            break;
+                                        }
+                                        std::thread::sleep(std::time::Duration::from_millis(10));
+                                    }
+                                    // Give nt37703 DSI 50ms to finish entering active state before HBM
+                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                    WAKE_PENDING.store(false, Ordering::SeqCst);
+                                    if DOWN.load(Ordering::SeqCst) && !LIT.swap(true, Ordering::SeqCst) {
+                                        hbm(true);
+                                    }
+                                });
+                            }
                         } else if armed() {
                             DOWN.store(true, Ordering::SeqCst);
                             arm();
