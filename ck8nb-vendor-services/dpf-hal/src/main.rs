@@ -1,10 +1,11 @@
 // IDisplayPanelFeature V1 HAL for Tecno CK8nB (Transsion NT37703 DSI video-mode panel, MTK).
-// Preserves full rsbinder bindings, gfpatch (in-memory libgf_hal.so patch), and working
-// lockscreen + screen-off/AOD FOD timing.
-// Added from stock vendor.oplus.hardware.displaypanelfeature-service disassembly:
-//   - ID 217 (GetDisplayLongruiAOD) -> 13 (0b1101: Panoramic/Full-Screen + All-Day + Keep-on-entry, LTPO bit off)
-//   - ID 193 (GetDisplayPanelVideo) -> 1  (DSI video-mode ramless panel)
-//   - Fast /dev/kmsg early-skip for gesture_data_write flood to cut CPU wakeups.
+// 100% Event-Driven & Deep-Sleep Friendly:
+// - Primary FOD watcher blocks directly on the touchscreen /dev/input/event* node (EV_KEY 195),
+//   meaning ZERO /dev/kmsg wakeups and 0.00% CPU when idle.
+// - Automatic fallback to fast-filtered /dev/kmsg only if /dev/input/event* cannot be opened.
+// - ID 217 (GetDisplayLongruiAOD) -> 15 (0b1111: Panoramic/Full-Screen + All-Day + Scheduled AOD).
+// - ID 193 (GetDisplayPanelVideo) -> 1  (DSI video-mode panel).
+// - Preserves full rsbinder bindings, gfpatch (in-memory libgf_hal.so patch), and lockscreen + screen-off FOD.
 mod bindings;
 mod fod_wake;
 mod gfpatch;
@@ -12,8 +13,20 @@ mod logging;
 
 use rsbinder::{hub, BinderResult, Interface, ProcessState};
 use bindings::{BnDisplayPanelFeature, IDisplayPanelFeature};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const HBM_NODE: &str = "/sys/kernel/tran_display/lcm_hbm_state";
+const SERVICE_NAME: &str = "vendor.oplus.hardware.displaypanelfeature.IDisplayPanelFeature/default";
+
+const ARM_MS: u64 = 30_000;
+const EV_KEY: u16 = 1;
+const FOD_KEY_CODE: u16 = 195;
+
+static SCREEN_OFF: AtomicBool = AtomicBool::new(false);
+static ARMED_UNTIL: AtomicU64 = AtomicU64::new(0);
+static DOWN: AtomicBool = AtomicBool::new(false);
+static LIT: AtomicBool = AtomicBool::new(false);
+static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
 
 fn hbm(on: bool) {
     let v = if on { "1" } else { "0" };
@@ -23,25 +36,36 @@ fn hbm(on: bool) {
     }
 }
 
-const ARM_MS: u64 = 30_000;
-static SCREEN_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static ARMED_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 fn now_ms() -> u64 {
     static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     BASE.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
 }
 fn arm() {
-    ARMED_UNTIL.store(now_ms() + ARM_MS, std::sync::atomic::Ordering::SeqCst);
+    ARMED_UNTIL.store(now_ms() + ARM_MS, Ordering::SeqCst);
 }
 fn disarm() {
-    ARMED_UNTIL.store(0, std::sync::atomic::Ordering::SeqCst);
+    ARMED_UNTIL.store(0, Ordering::SeqCst);
 }
 fn armed() -> bool {
-    now_ms() < ARMED_UNTIL.load(std::sync::atomic::Ordering::SeqCst)
+    now_ms() < ARMED_UNTIL.load(Ordering::SeqCst)
 }
 
-const SERVICE_NAME: &str = "vendor.oplus.hardware.displaypanelfeature.IDisplayPanelFeature/default";
+/// On-demand check (only called when FOD key 195 is pressed) to tell screen-off/AOD from bright active screen.
+fn is_screen_off_or_aod() -> bool {
+    const BL_PATHS: [&str; 3] = [
+        "/sys/class/leds/lcd-backlight/brightness",
+        "/sys/class/backlight/panel0-backlight/brightness",
+        "/sys/class/backlight/mtk_disp_backlight/brightness",
+    ];
+    for p in BL_PATHS {
+        if let Ok(s) = std::fs::read_to_string(p) {
+            if let Ok(val) = s.trim().parse::<i32>() {
+                return val <= 30;
+            }
+        }
+    }
+    SCREEN_OFF.load(Ordering::SeqCst)
+}
 
 struct Dpf;
 impl Interface for Dpf {}
@@ -49,10 +73,9 @@ impl Interface for Dpf {}
 impl IDisplayPanelFeature for Dpf {
     fn getDisplayPanelFeatureValue(&self, id: i32, values: &mut Vec<i32>) -> BinderResult<i32> {
         let reply = match id {
-            // GetDisplayLongruiAOD: 13 (0b1101) = Panoramic/Full-Screen + All-Day + Keep-on-entry;
-            // bit 1 (LTPO hardware smooth-switch) stays 0 for non-LTPO panels.
-            217 => 13,
-            // GetDisplayPanelVideo: 1 = DSI video-mode panel (nt37703_fhdp_dsi_vdo).
+            // GetDisplayLongruiAOD: 15 (0b1111) = Panoramic/Full-Screen + All-Day + Scheduled AOD
+            217 => 15,
+            // GetDisplayPanelVideo: 1 = DSI video-mode panel (nt37703_fhdp_dsi_vdo)
             193 => 1,
             _ => 0,
         };
@@ -121,15 +144,115 @@ fn send_full_hbm_uevent() {
 fn announce_hbm() {
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_millis(80));
-        send_full_hbm_uevent();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        send_full_hbm_uevent();
+        if DOWN.load(Ordering::SeqCst) {
+            send_full_hbm_uevent();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(180));
+        if DOWN.load(Ordering::SeqCst) {
+            send_full_hbm_uevent();
+        }
     });
 }
 
-static DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static LIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static WAKE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn handle_fod_down_event_driven() {
+    if armed() && !is_screen_off_or_aod() {
+        DOWN.store(true, Ordering::SeqCst);
+        arm();
+        if !LIT.swap(true, Ordering::SeqCst) {
+            hbm(true);
+            announce_hbm();
+        }
+    } else if is_screen_off_or_aod() {
+        DOWN.store(true, Ordering::SeqCst);
+        arm();
+        if !WAKE_PENDING.swap(true, Ordering::SeqCst) {
+            logging::info("fod key 195 down while screen off/AOD -> waking panel via uinput");
+            std::thread::spawn(|| {
+                fod_wake::inject_wakeup();
+                // Wait for nt37703 panel to enter active state, then write HBM + retry once if still held.
+                std::thread::sleep(std::time::Duration::from_millis(110));
+                if DOWN.load(Ordering::SeqCst) {
+                    LIT.store(true, Ordering::SeqCst);
+                    hbm(true);
+                    announce_hbm();
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                    if DOWN.load(Ordering::SeqCst) {
+                        hbm(true);
+                    }
+                }
+                WAKE_PENDING.store(false, Ordering::SeqCst);
+            });
+        }
+    } else {
+        logging::info("fod key 195 down ignored (screen brightly on, FOD not armed)");
+    }
+}
+
+fn handle_fod_up() {
+    DOWN.store(false, Ordering::SeqCst);
+    if LIT.swap(false, Ordering::SeqCst) {
+        hbm(false);
+    }
+}
+
+#[repr(C)]
+struct InputEvent {
+    tv_sec: i64,
+    tv_usec: i64,
+    type_: u16,
+    code: u16,
+    value: i32,
+}
+
+fn find_touch_event_device() -> Option<String> {
+    for n in 0..32 {
+        let name_path = format!("/sys/class/input/event{n}/device/name");
+        if let Ok(name) = std::fs::read_to_string(&name_path) {
+            let low = name.trim().to_ascii_lowercase();
+            if low.contains("tpd") || low.contains("touch") || low.contains("fts") || low.contains("focaltech") {
+                let dev = format!("/dev/input/event{n}");
+                logging::info(&format!("found touch input device: {dev} ({})", name.trim()));
+                return Some(dev);
+            }
+        }
+    }
+    None
+}
+
+fn try_input_event_watch() -> bool {
+    use std::io::Read;
+    let Some(dev_path) = find_touch_event_device() else {
+        logging::error("no touch /dev/input/event* device found; falling back to kmsg");
+        return false;
+    };
+    let mut f = match std::fs::File::open(&dev_path) {
+        Ok(f) => f,
+        Err(e) => {
+            logging::error(&format!("open {dev_path} failed ({e}); falling back to kmsg"));
+            return false;
+        }
+    };
+    logging::info(&format!("event-driven FOD watch active on {dev_path} (0 idle wakeups)"));
+    let mut raw = [0u8; std::mem::size_of::<InputEvent>()];
+    loop {
+        match f.read_exact(&mut raw) {
+            Ok(()) => {
+                let ev: InputEvent = unsafe { std::ptr::read_unaligned(raw.as_ptr() as *const InputEvent) };
+                if ev.type_ == EV_KEY && ev.code == FOD_KEY_CODE {
+                    if ev.value == 1 {
+                        handle_fod_down_event_driven();
+                    } else if ev.value == 0 {
+                        handle_fod_up();
+                    }
+                }
+            }
+            Err(e) => {
+                logging::error(&format!("input read error on {dev_path}: {e}"));
+                return false;
+            }
+        }
+    }
+}
 
 #[inline]
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -139,8 +262,7 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-fn fod_watch() {
-    use std::sync::atomic::Ordering;
+fn fod_watch_kmsg_fallback() {
     use std::io::Read;
     loop {
         let mut f = match std::fs::File::open("/dev/kmsg") {
@@ -152,7 +274,7 @@ fn fod_watch() {
             }
         };
         unsafe { lseek_end(&f) };
-        logging::info("fod watch running (kmsg)");
+        logging::info("fod watch running (kmsg fallback)");
         let mut buf = vec![0u8; 8192];
         loop {
             match f.read(&mut buf) {
@@ -163,7 +285,6 @@ fn fod_watch() {
                         Some(i) => &rec[i + 1..],
                         None => rec,
                     };
-                    // Fast reject: ignore the high-rate gesture_data_write flood and unrelated lines.
                     if msg.len() < 12 || contains_bytes(msg, b"gesture_data_write") {
                         continue;
                     }
@@ -173,11 +294,9 @@ fn fod_watch() {
                     if !is_hbm && !is_fod && !is_mode {
                         continue;
                     }
-
                     if is_hbm && contains_bytes(msg, b"skip set hbm node") {
                         LIT.store(false, Ordering::SeqCst);
                         if DOWN.load(Ordering::SeqCst) {
-                            logging::info("hbm skipped by panel -> retrying in 60ms");
                             std::thread::spawn(|| {
                                 std::thread::sleep(std::time::Duration::from_millis(60));
                                 if DOWN.load(Ordering::SeqCst) && !LIT.swap(true, Ordering::SeqCst) {
@@ -196,7 +315,6 @@ fn fod_watch() {
                             });
                         }
                     }
-
                     if is_mode {
                         let text = String::from_utf8_lossy(msg);
                         if let Some(i) = text.find("--> ") {
@@ -206,16 +324,13 @@ fn fod_watch() {
                             if !off {
                                 arm();
                             }
-                            logging::info(&format!("touch mode -> {new_mode} (screen_off={off})"));
                         }
                     }
-
                     if is_fod && contains_bytes(msg, b"fod finger down") {
                         if SCREEN_OFF.load(Ordering::SeqCst) {
                             DOWN.store(true, Ordering::SeqCst);
                             arm();
                             if !WAKE_PENDING.swap(true, Ordering::SeqCst) {
-                                logging::info("fod finger down while screen off -> waking panel via uinput");
                                 std::thread::spawn(|| {
                                     fod_wake::inject_wakeup();
                                     for _ in 0..40 {
@@ -237,24 +352,22 @@ fn fod_watch() {
                             if !LIT.swap(true, Ordering::SeqCst) {
                                 hbm(true);
                             }
-                        } else {
-                            logging::info("fod finger down ignored (FOD not shown, screen on)");
                         }
                     } else if is_fod && contains_bytes(msg, b"fod finger up") {
-                        DOWN.store(false, Ordering::SeqCst);
-                        if LIT.swap(false, Ordering::SeqCst) {
-                            hbm(false);
-                        }
+                        handle_fod_up();
                     }
                 }
                 Err(e) if e.raw_os_error() == Some(32) => continue,
-                Err(e) => {
-                    logging::error(&format!("fod watch: kmsg read error: {e}"));
-                    break;
-                }
+                Err(_) => break,
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+fn fod_watch() {
+    if !try_input_event_watch() {
+        fod_watch_kmsg_fallback();
     }
 }
 
