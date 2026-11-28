@@ -67,6 +67,19 @@ Build: run the `build-face-stub` workflow, download `ck8nb-face-stub`. Install:
 Delete any other face HAL rc that starts a different `IFace` service, and add to `vendor_file_contexts`:
 `/vendor/bin/hw/android\.hardware\.biometrics\.face-service u:object_r:hal_face_default_exec:s0`
 
+### Checked against a real CK8nB vendor listing (COS 17.0.1 EU)
+
+| Finding | What to do |
+|---|---|
+| `vendor/etc/init/android.hardware.biometrics.face@1.0-service.rc` and its `.example` binary are present, so the stock HIDL face daemon runs next to the stub | Keep it. It is what makes the Add face button work. It does not conflict with the AIDL stub |
+| Both `manifest_face_default.xml` and `face_stub.xml` are in `vendor/etc/vintf/manifest/` | Keep only one declaration of `android.hardware.biometrics.face`. If you keep `manifest_face_default.xml`, delete `face_stub.xml`; if you keep `face_stub.xml`, make sure its `<version>` matches what the stub serves (3). Two declarations make VINTF verification noisy and can pick the wrong version |
+| `vendor.transsion.hardware.tranfacaidl-service.xml` and `vendor.transsion.hardware.tranfacaidl-V1-ndk_platform.so` exist but no `tranfacaidl` service binary is in `vendor/bin/hw` | The Transsion face service is declared but not shipped on this build, so there is nothing to wrap yet. Run `scripts/probe-face.sh` and look for it in the stock vendor image |
+| `libstfaceunlockppl.so` (32 and 64 bit), `libTranfacFunction.so`, `libfeature.face.so`, `libmegface.so`, `libFaceDetectCA.so` are present | These are the engine candidates. A real HAL has to call one of them, which needs its exported API (see `scripts/probe-face.sh`) |
+
+### Why the enrollment camera is black
+
+This is intended, not a bug. `FaceEnrollClient` hands the HAL a preview surface and calls `enroll`; the stub answers `UNABLE_TO_PROCESS` immediately and never opens the camera, so the preview never gets a frame and Settings shows "failed to add face data". The stub only keeps system_server from crashing. Real face enrollment needs a HAL that opens the front camera, runs a face engine and reports enrollment progress, or the services.jar camera bridge approach.
+
 ## Licence
 
 `face-stub/` is Apache-2.0 (AIDL from AOSP, scaffolding from Xia's repo).
