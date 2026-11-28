@@ -246,6 +246,10 @@ fn fod_watch() {
                                     }
                                 });
                             }
+                        } else if WAKE_PENDING.load(Ordering::SeqCst) {
+                            // Ignore the duplicate fod finger down emitted 2ms after TRAN_ACTIVE_MODE
+                            // so the wake thread finishes its 50ms panel-settle delay cleanly.
+                            DOWN.store(true, Ordering::SeqCst);
                         } else if armed() {
                             DOWN.store(true, Ordering::SeqCst);
                             arm();
