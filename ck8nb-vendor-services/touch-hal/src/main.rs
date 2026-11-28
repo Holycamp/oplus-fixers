@@ -1,10 +1,11 @@
 // IOplusTouch V2 HAL for Transsion tran_touch / FocalTech (Tecno CK8nB).
 // Fixes:
-// 1. V (0x76 / 0x54) -> ColorOS 2 (UpVee = Flashlight), Λ/^ (0x5e) -> ColorOS 3 (DownVee = Calculator).
-// 2. Adds "5e" (^) to GESTURES so Λ/^ is actually enabled in /proc/gesture_function!
-// 3. Stops hammering /proc/gesture_function every 5s while screen is in TRAN_GESTURE_SUSPEND_MODE
-//    (only refreshes while screen is active or on flag=21) so drawn letters aren't interrupted mid-stroke.
-// 4. Ignores non-F4 events (0xbe) without poisoning LAST_GESTURE / GESTURE_SEQ and reads fts_gesture_buf directly.
+// 1. Disables unused e0/c0/z0/s0 in /proc/gesture_function so FocalTech stops mistaking O for C (0x63/52).
+// 2. Maps C (0x63/0x34) -> 6 (O / Camera) as a fallback for slightly open circles.
+// 3. Maps V (0x76/0x54) -> 2 (Flashlight), Λ (0x5e/0x55) -> 3 (Calculator),
+//    < (0x3c) -> 4, > (0x3e) -> 5, O (0x6f/0x30) -> 6, || (0x22/0x7c) -> 7,
+//    M (0x6d/0x32) -> 12, W (0x77/0x31) -> 13, Double-Tap (0xcc/0x24) -> 1.
+// 4. Pair with `key 183 F4` (no WAKE) in mtk-tpd.kl so Flashlight (V) toggles with screen OFF.
 mod bindings;
 mod logging;
 
@@ -36,23 +37,23 @@ static GESTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 static CONSUMED_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Maps kernel ASCII hex codes (g_gtp_gesture=0x..) and FocalTech Gesture IDs -> ColorOS nGesture:
-/// 1 = Double-Tap, 2 = V (UpVee / Flashlight), 3 = Λ/^ (DownVee / Calculator),
-/// 4 = <, 5 = >, 6 = O (Circle / Camera), 12 = M, 13 = W.
+/// 1 = Double-Tap, 2 = V (Flashlight), 3 = Λ/^ (Calculator), 4 = <, 5 = >,
+/// 6 = O (Camera), 7 = || (Music Play/Pause), 12 = M, 13 = W.
 fn gesture_type(code: u32) -> Option<u32> {
     match code {
-        0xcc | 0x24 => Some(1),  // Double-Tap
-        0x76 | 0x54 => Some(2),  // V -> UpVee (Flashlight)
-        0x5e | 0x55 => Some(3),  // Λ / ^ -> DownVee (Calculator)
-        0x3c => Some(4),         // < -> LeftVee
-        0x3e => Some(5),         // > -> RightVee
-        0x6f | 0x30 => Some(6),  // O -> Circle (Camera)
-        0x6d | 0x32 => Some(12), // M
-        0x77 | 0x31 => Some(13), // W
+        0xcc | 0x24 => Some(1),         // Double-Tap
+        0x76 | 0x54 => Some(2),         // V -> UpVee (Flashlight)
+        0x5e | 0x55 => Some(3),         // Λ / ^ -> DownVee (Calculator)
+        0x3c => Some(4),                // < -> Previous track
+        0x3e => Some(5),                // > -> Next track
+        0x6f | 0x30 | 0x63 | 0x34 => Some(6), // O (and open-circle C) -> Circle (Camera)
+        0x22 | 0x7c => Some(7),         // || -> Play/Pause
+        0x6d | 0x32 => Some(12),        // M
+        0x77 | 0x31 => Some(13),        // W
         _ => None,
     }
 }
 
-/// Raw libc::read helper (keeps newlines intact and avoids std::fs::read_to_string panics on vendor sysfs).
 fn read_sysfs_libc(path: &str) -> String {
     use std::ffi::CString;
     let Ok(c) = CString::new(path) else { return String::new() };
@@ -72,7 +73,6 @@ fn read_sysfs_libc(path: &str) -> String {
     }
 }
 
-/// Parse the "n( x,y)" pairs of fts_gesture_buf and sample six points + turning direction.
 fn parse_points_from_text(t: &str) -> (String, i32) {
     let mut pts: Vec<(i32, i32)> = Vec::new();
     for part in t.split('(').skip(1) {
@@ -108,7 +108,6 @@ fn gesture_points() -> (String, i32) {
     parse_points_from_text(&read_sysfs_libc(FTS_BUF))
 }
 
-/// Direct zero-race read of Gesture ID + points straight from fts_gesture_buf.
 fn read_direct_fts_gesture() -> Option<String> {
     let t = read_sysfs_libc(FTS_BUF);
     for line in t.lines() {
@@ -135,7 +134,6 @@ fn read_direct_fts_gesture() -> Option<String> {
     None
 }
 
-/// Follows the kernel log for "g_gtp_gesture=0x.." and touch suspend/active mode transitions.
 fn gesture_watch() {
     use std::io::Read;
     loop {
@@ -188,14 +186,12 @@ fn gesture_watch() {
 }
 
 fn gesture_info() -> String {
-    // 1. Primary path: read Gesture ID directly from fts_gesture_buf (zero race!)
     if let Some(direct) = read_direct_fts_gesture() {
         CONSUMED_SEQ.store(GESTURE_SEQ.load(Ordering::SeqCst), Ordering::SeqCst);
         logging::info(&format!("flag2 (direct fts_buf) -> {direct}"));
         return direct;
     }
 
-    // 2. Fallback: wait briefly for kmsg watcher
     let start = Instant::now();
     loop {
         let seq = GESTURE_SEQ.load(Ordering::SeqCst);
@@ -217,11 +213,16 @@ fn gesture_info() -> String {
     DOUBLE_TAP_INFO.to_string()
 }
 
-// Includes "5e" (Λ / ^) and "3e" (>) so all ColorOS screen-off shapes are enabled in the touch IC!
-const GESTURES: [&str; 13] = ["al", "cc", "fp", "5e", "3e", "o0", "v0", "w0", "m0", "e0", "c0", "z0", "s0"];
+// Enable ONLY the gestures ColorOS actually uses; explicitly disable e0/c0/z0/s0
+// so FocalTech doesn't misclassify slightly open O circles as C (0x63/52).
+const GESTURES_ON: [&str; 9] = ["al", "cc", "fp", "5e", "3e", "o0", "v0", "w0", "m0"];
+const GESTURES_OFF: [&str; 4] = ["e0", "c0", "z0", "s0"];
 
 fn enable_gestures(first: bool) {
-    for g in GESTURES {
+    for g in GESTURES_OFF {
+        let _ = fs::write(GESTURE_FN, format!("{g}0"));
+    }
+    for g in GESTURES_ON {
         let cmd = format!("{g}1");
         match fs::write(GESTURE_FN, &cmd) {
             Ok(_) => {
@@ -349,7 +350,6 @@ fn main() {
     std::thread::spawn(gesture_watch);
     std::thread::spawn(|| loop {
         std::thread::sleep(std::time::Duration::from_secs(5));
-        // Only refresh while the screen is awake so we never interrupt gesture IC mid-draw!
         if DT2W.load(Ordering::Relaxed) && !SCREEN_OFF.load(Ordering::SeqCst) {
             enable_gestures(false);
         }
