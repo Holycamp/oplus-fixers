@@ -1,0 +1,43 @@
+name: Build CK8nB Face HAL (aarch64-linux-android)
+
+on:
+  push:
+    paths:
+      - "ck8nb-vendor-services/face-hal/**"
+      - ".github/workflows/build-face.yml"
+  workflow_dispatch:
+
+jobs:
+  build-face:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust + aarch64-linux-android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Setup Android NDK
+        run: |
+          NDK_ROOT="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android34-clang" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android34-clang" >> $GITHUB_ENV
+
+      - name: Build android.hardware.biometrics.face-service.ck8nb
+        run: |
+          cargo build --release --manifest-path ck8nb-vendor-services/face-hal/Cargo.toml --target aarch64-linux-android
+
+      - name: Stage /vendor/ package
+        run: |
+          mkdir -p dist/vendor/bin/hw dist/vendor/etc/init dist/vendor/etc/vintf/manifest
+          cp ck8nb-vendor-services/face-hal/target/aarch64-linux-android/release/android.hardware.biometrics.face-service.ck8nb dist/vendor/bin/hw/
+          ls -lh dist/vendor/bin/hw/
+
+      - name: Upload Face HAL Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ck8nb-face-hal-aarch64
+          path: dist/
