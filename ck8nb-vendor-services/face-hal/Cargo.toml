@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "android.hardware.biometrics.face-service.ck8nb"
+name = "ck8nb-face-hal"
 path = "src/main.rs"
 
 [dependencies]
