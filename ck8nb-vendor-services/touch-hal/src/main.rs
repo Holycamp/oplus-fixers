@@ -1,6 +1,8 @@
 // IOplusTouch V2 HAL for Transsion tran_touch / FocalTech (Tecno CK8nB).
-// Preserves full rsbinder IOplusTouch V2 implementation + adds zero-race direct FTS_BUF
-// Gesture ID fallback via raw libc::read so O, V, W, M work reliably alongside DT2W.
+// Fixes:
+// 1. Stops non-F4 gestures like 0xbe (Single finger down / scanCode 190) from poisoning
+//    LAST_GESTURE="0" and GESTURE_SEQ (which made the next real gesture return "0" in 0 ms!).
+// 2. Reads fts_gesture_buf directly via raw libc::read FIRST on flag=2 (zero kmsg race).
 mod bindings;
 mod logging;
 
@@ -124,7 +126,9 @@ fn read_direct_fts_gesture() -> Option<String> {
     None
 }
 
-/// Follows the kernel log for "g_gtp_gesture=0x.." and keeps the matching ColorOS gesture string.
+/// Follows the kernel log for "g_gtp_gesture=0x.." and keeps ONLY valid ColorOS gestures.
+/// Non-F4 events like 0xbe (Single finger down / scanCode 190) are ignored without touching
+/// LAST_GESTURE or GESTURE_SEQ so they never poison the next real gesture.
 fn gesture_watch() {
     use std::io::Read;
     loop {
@@ -160,19 +164,15 @@ fn gesture_watch() {
                     if let Some(i) = rec.find("g_gtp_gesture=0x") {
                         let hex: String = rec[i + 16..].chars().take_while(|c| c.is_ascii_hexdigit()).collect();
                         let code = u32::from_str_radix(&hex, 16).unwrap_or(0);
-                        match gesture_type(code) {
-                            Some(t) => {
-                                let (pts, cw) = gesture_points();
-                                let info = if t == 1 { DOUBLE_TAP_INFO.to_string() } else { format!("{t},{pts},{cw}") };
-                                logging::info(&format!("gesture 0x{code:x} -> type {t} info={info}"));
-                                *LAST_GESTURE.lock().unwrap() = Some((Instant::now(), info));
-                                GESTURE_SEQ.fetch_add(1, Ordering::SeqCst);
-                            }
-                            None => {
-                                logging::info(&format!("gesture 0x{code:x} has no ColorOS type, ignored"));
-                                *LAST_GESTURE.lock().unwrap() = Some((Instant::now(), "0".to_string()));
-                                GESTURE_SEQ.fetch_add(1, Ordering::SeqCst);
-                            }
+                        if let Some(t) = gesture_type(code) {
+                            let (pts, cw) = gesture_points();
+                            let info = if t == 1 { DOUBLE_TAP_INFO.to_string() } else { format!("{t},{pts},{cw}") };
+                            logging::info(&format!("gesture 0x{code:x} -> type {t} info={info}"));
+                            *LAST_GESTURE.lock().unwrap() = Some((Instant::now(), info));
+                            GESTURE_SEQ.fetch_add(1, Ordering::SeqCst);
+                        } else {
+                            // Do NOT touch LAST_GESTURE or GESTURE_SEQ!
+                            logging::info(&format!("gesture 0x{code:x} ignored (non-F4 event)"));
                         }
                     }
                 }
@@ -188,13 +188,22 @@ fn gesture_watch() {
 }
 
 fn gesture_info() -> String {
+    // 1. Zero-race primary path: read Gesture ID directly from fts_gesture_buf!
+    //    The FocalTech IRQ handler writes fts_gesture_buf BEFORE emitting KEY_F13/KEY_F4.
+    if let Some(direct) = read_direct_fts_gesture() {
+        CONSUMED_SEQ.store(GESTURE_SEQ.load(Ordering::SeqCst), Ordering::SeqCst);
+        logging::info(&format!("flag2 (direct fts_buf) -> {direct}"));
+        return direct;
+    }
+
+    // 2. Fallback: wait briefly for kmsg watcher if fts_gesture_buf wasn't readable
     let start = Instant::now();
     loop {
         let seq = GESTURE_SEQ.load(Ordering::SeqCst);
         if seq != CONSUMED_SEQ.load(Ordering::SeqCst) {
             CONSUMED_SEQ.store(seq, Ordering::SeqCst);
             if let Some((t, s)) = LAST_GESTURE.lock().unwrap().as_ref() {
-                if t.elapsed() < Duration::from_secs(3) {
+                if t.elapsed() < Duration::from_millis(800) && s != "0" {
                     logging::info(&format!("flag2 (kmsg) -> {s} (waited {} ms)", start.elapsed().as_millis()));
                     return s.clone();
                 }
@@ -205,11 +214,6 @@ fn gesture_info() -> String {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
-    }
-    // Zero-race fallback: read Gesture ID directly from fts_gesture_buf!
-    if let Some(direct) = read_direct_fts_gesture() {
-        logging::info(&format!("flag2 (direct fts_buf) -> {direct}"));
-        return direct;
     }
     DOUBLE_TAP_INFO.to_string()
 }
