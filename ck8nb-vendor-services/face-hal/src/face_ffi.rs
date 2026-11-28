@@ -143,12 +143,19 @@ pub struct FaceDevice {
     pub reset_lockout: Option<unsafe extern "C" fn(*mut FaceDevice, *const LegacyHwAuthToken) -> c_int>, // 0xf0
 }
 
-#[link(name = "hardware")]
-extern "C" {
-    fn hw_get_module(id: *const c_char, module: *mut *const HwModule) -> c_int;
-}
+type HwGetModuleFn =
+    unsafe extern "C" fn(id: *const c_char, module: *mut *const HwModule) -> c_int;
 
 pub unsafe fn open_face_device() -> Result<*mut FaceDevice, c_int> {
+    let lib = libc::dlopen(b"libhardware.so\0".as_ptr() as *const c_char, libc::RTLD_NOW);
+    if lib.is_null() {
+        return Err(-10);
+    }
+    let sym = libc::dlsym(lib, b"hw_get_module\0".as_ptr() as *const c_char);
+    if sym.is_null() {
+        return Err(-11);
+    }
+    let hw_get_module: HwGetModuleFn = core::mem::transmute(sym);
     let mut module: *const HwModule = core::ptr::null();
     let rc = hw_get_module(b"face\0".as_ptr() as *const c_char, &mut module);
     if rc != 0 || module.is_null() {
