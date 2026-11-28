@@ -1,0 +1,32 @@
+package android.hardware.biometrics.face;
+@VintfStability
+@Backing(type="byte")
+enum AcquiredInfo {
+    UNKNOWN = 0,
+    GOOD = 1,
+    INSUFFICIENT = 2,
+    TOO_BRIGHT = 3,
+    TOO_DARK = 4,
+    TOO_CLOSE = 5,
+    TOO_FAR = 6,
+    FACE_TOO_HIGH = 7,
+    FACE_TOO_LOW = 8,
+    FACE_TOO_RIGHT = 9,
+    FACE_TOO_LEFT = 10,
+    POOR_GAZE = 11,
+    NOT_DETECTED = 12,
+    TOO_MUCH_MOTION = 13,
+    RECALIBRATE = 14,
+    TOO_DIFFERENT = 15,
+    TOO_SIMILAR = 16,
+    PAN_TOO_EXTREME = 17,
+    TILT_TOO_EXTREME = 18,
+    ROLL_TOO_EXTREME = 19,
+    FACE_OBSCURED = 20,
+    START = 21,
+    SENSOR_DIRTY = 22,
+    VENDOR = 23,
+    FIRST_FRAME_RECEIVED = 24,
+    DARK_GLASSES_DETECTED = 25,
+    MOUTH_COVERING_DETECTED = 26,
+}
