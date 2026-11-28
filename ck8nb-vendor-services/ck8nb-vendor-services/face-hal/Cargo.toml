@@ -1,0 +1,15 @@
+[package]
+name = "ck8nb-face-hal"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ck8nb-face-hal"
+path = "src/main.rs"
+
+[dependencies]
+rsbinder = "0.13"
+libc = "0.2"
+
+[build-dependencies]
+rsbinder-aidl = "0.13"
