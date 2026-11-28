@@ -135,10 +135,15 @@ fn send_full_hbm_uevent() {
 
 fn announce_hbm() {
     std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_millis(80));
-        send_full_hbm_uevent();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        send_full_hbm_uevent();
+        // 25ms (~3 frames at 120Hz) is enough for HBM to reach peak brightness before Goodix captures
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        if DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+            send_full_hbm_uevent();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(85));
+        if DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+            send_full_hbm_uevent();
+        }
     });
 }
 
@@ -192,13 +197,24 @@ fn fod_watch() {
                     if is_hbm && contains_bytes(msg, b"skip set hbm node") {
                         LIT.store(false, Ordering::SeqCst);
                         if DOWN.load(Ordering::SeqCst) {
-                            logging::info("hbm skipped by panel -> retrying in 60ms");
-                            std::thread::spawn(|| {
-                                std::thread::sleep(std::time::Duration::from_millis(60));
-                                if DOWN.load(Ordering::SeqCst) && !LIT.swap(true, Ordering::SeqCst) {
-                                    hbm(true);
-                                }
-                            });
+                            if !WAKE_PENDING.swap(true, Ordering::SeqCst) {
+                                logging::info("hbm skipped by sleeping/AOD panel -> waking panel via uinput");
+                                std::thread::spawn(|| {
+                                    fod_wake::inject_wakeup();
+                                    std::thread::sleep(std::time::Duration::from_millis(90));
+                                    WAKE_PENDING.store(false, Ordering::SeqCst);
+                                    if DOWN.load(Ordering::SeqCst) && !LIT.swap(true, Ordering::SeqCst) {
+                                        hbm(true);
+                                    }
+                                });
+                            } else {
+                                std::thread::spawn(|| {
+                                    std::thread::sleep(std::time::Duration::from_millis(35));
+                                    if DOWN.load(Ordering::SeqCst) && !LIT.swap(true, Ordering::SeqCst) {
+                                        hbm(true);
+                                    }
+                                });
+                            }
                         }
                     } else if is_hbm && contains_bytes(msg, b"tran_lcm_hbm_store value= 1") {
                         announce_hbm();
@@ -233,13 +249,13 @@ fn fod_watch() {
                                 logging::info("fod finger down while screen off -> waking panel via uinput");
                                 std::thread::spawn(|| {
                                     fod_wake::inject_wakeup();
-                                    for _ in 0..40 {
+                                    for _ in 0..80 {
                                         if !SCREEN_OFF.load(Ordering::SeqCst) {
                                             break;
                                         }
-                                        std::thread::sleep(std::time::Duration::from_millis(10));
+                                        std::thread::sleep(std::time::Duration::from_millis(5));
                                     }
-                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                    std::thread::sleep(std::time::Duration::from_millis(20));
                                     WAKE_PENDING.store(false, Ordering::SeqCst);
                                     if DOWN.load(Ordering::SeqCst) && !LIT.swap(true, Ordering::SeqCst) {
                                         hbm(true);
