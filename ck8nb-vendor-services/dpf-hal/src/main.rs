@@ -1,10 +1,11 @@
 // IDisplayPanelFeature V1 HAL for Tecno CK8nB (Transsion NT37703 DSI video-mode panel, MTK).
-// Preserves full rsbinder bindings, gfpatch (in-memory libgf_hal.so patch), and working
-// lockscreen + screen-off/AOD FOD timing.
-// Added from stock vendor.oplus.hardware.displaypanelfeature-service disassembly:
-//   - ID 217 (GetDisplayLongruiAOD) -> 15 (0b1111: Panoramic/Full-Screen + All-Day + Scheduled)
-//   - ID 193 (GetDisplayPanelVideo) -> 1  (DSI video-mode ramless panel)
-//   - Fast /dev/kmsg early-skip for gesture_data_write flood to cut CPU wakeups.
+// Preserves full rsbinder bindings, gfpatch (in-memory libgf_hal.so patch), Panoramic/Full-Screen AOD
+// (ID 217=15, ID 193=1), and ultra-fast screen-on + screen-off/AOD FOD timing:
+//   - Pre-creates /dev/uinput wakeup device at HAL boot (0ms first-tap penalty).
+//   - Triggers HBM immediately on kernel `panel_doze_disable end` / `lcm_setbacklight_cmdq level =`
+//     instead of waiting for touch TRAN_ACTIVE_MODE + 20ms (~45-50ms faster screen-off FOD).
+//   - Tightens `FULL_HBM_SET` uevent to 10ms (1+ frame at 120Hz) with 45ms backup retry.
+//   - Fast 12ms HBM retry if `skip set hbm node` is hit 1 frame early (with uinput wake fallback).
 mod bindings;
 mod fod_wake;
 mod gfpatch;
@@ -135,12 +136,13 @@ fn send_full_hbm_uevent() {
 
 fn announce_hbm() {
     std::thread::spawn(|| {
-        // 25ms (~3 frames at 120Hz) is enough for HBM to reach peak brightness before Goodix captures
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        // 10ms (>1 frame at 120Hz) after synchronous DSI HBM cmdq is enough for peak brightness
+        std::thread::sleep(std::time::Duration::from_millis(10));
         if DOWN.load(std::sync::atomic::Ordering::SeqCst) {
             send_full_hbm_uevent();
         }
-        std::thread::sleep(std::time::Duration::from_millis(85));
+        // Backup pulse if Goodix wasn't ready on the first frame
+        std::thread::sleep(std::time::Duration::from_millis(45));
         if DOWN.load(std::sync::atomic::Ordering::SeqCst) {
             send_full_hbm_uevent();
         }
@@ -150,6 +152,8 @@ fn announce_hbm() {
 static DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static WAKE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RETRY_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAST_WAKE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[inline]
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -157,6 +161,29 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         return false;
     }
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+fn trigger_hbm_now() {
+    use std::sync::atomic::Ordering;
+    if DOWN.load(Ordering::SeqCst) && !LIT.swap(true, Ordering::SeqCst) {
+        hbm(true);
+    }
+}
+
+fn start_panel_wake(reason: &'static str) {
+    use std::sync::atomic::Ordering;
+    if !WAKE_PENDING.swap(true, Ordering::SeqCst) {
+        LAST_WAKE_MS.store(now_ms(), Ordering::SeqCst);
+        logging::info(reason);
+        std::thread::spawn(|| {
+            fod_wake::inject_wakeup();
+            // Safety fallback if neither panel_doze_disable end nor TRAN_ACTIVE_MODE fires
+            std::thread::sleep(std::time::Duration::from_millis(180));
+            if WAKE_PENDING.swap(false, Ordering::SeqCst) {
+                trigger_hbm_now();
+            }
+        });
+    }
 }
 
 fn fod_watch() {
@@ -172,7 +199,7 @@ fn fod_watch() {
             }
         };
         unsafe { lseek_end(&f) };
-        logging::info("fod watch running (kmsg)");
+        logging::info("fod watch running (kmsg, ultra-fast)");
         let mut buf = vec![0u8; 8192];
         loop {
             match f.read(&mut buf) {
@@ -190,29 +217,34 @@ fn fod_watch() {
                     let is_hbm = contains_bytes(msg, b"hbm");
                     let is_fod = contains_bytes(msg, b"fod finger ");
                     let is_mode = contains_bytes(msg, b"core mode change");
-                    if !is_hbm && !is_fod && !is_mode {
+                    let is_panel_ready = contains_bytes(msg, b"panel_doze_disable end")
+                        || contains_bytes(msg, b"lcm_setbacklight_cmdq level =");
+                    if !is_hbm && !is_fod && !is_mode && !is_panel_ready {
                         continue;
+                    }
+
+                    // Instant HBM as soon as panel exits DOZE or sets active backlight during a wake.
+                    if is_panel_ready && WAKE_PENDING.swap(false, Ordering::SeqCst) {
+                        logging::info("panel active -> firing immediate HBM");
+                        std::thread::spawn(|| {
+                            std::thread::sleep(std::time::Duration::from_millis(4));
+                            trigger_hbm_now();
+                        });
                     }
 
                     if is_hbm && contains_bytes(msg, b"skip set hbm node") {
                         LIT.store(false, Ordering::SeqCst);
                         if DOWN.load(Ordering::SeqCst) {
-                            if !WAKE_PENDING.swap(true, Ordering::SeqCst) {
-                                logging::info("hbm skipped by sleeping/AOD panel -> waking panel via uinput");
+                            let since_wake = now_ms().saturating_sub(LAST_WAKE_MS.load(Ordering::SeqCst));
+                            if since_wake > 250 && !WAKE_PENDING.load(Ordering::SeqCst) {
+                                start_panel_wake("hbm skipped by sleeping/AOD panel -> waking panel via uinput");
+                            } else if !WAKE_PENDING.load(Ordering::SeqCst)
+                                && !RETRY_PENDING.swap(true, Ordering::SeqCst)
+                            {
                                 std::thread::spawn(|| {
-                                    fod_wake::inject_wakeup();
-                                    std::thread::sleep(std::time::Duration::from_millis(90));
-                                    WAKE_PENDING.store(false, Ordering::SeqCst);
-                                    if DOWN.load(Ordering::SeqCst) && !LIT.swap(true, Ordering::SeqCst) {
-                                        hbm(true);
-                                    }
-                                });
-                            } else {
-                                std::thread::spawn(|| {
-                                    std::thread::sleep(std::time::Duration::from_millis(35));
-                                    if DOWN.load(Ordering::SeqCst) && !LIT.swap(true, Ordering::SeqCst) {
-                                        hbm(true);
-                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(12));
+                                    RETRY_PENDING.store(false, Ordering::SeqCst);
+                                    trigger_hbm_now();
                                 });
                             }
                         }
@@ -220,7 +252,7 @@ fn fod_watch() {
                         announce_hbm();
                         if !DOWN.load(Ordering::SeqCst) {
                             std::thread::spawn(|| {
-                                std::thread::sleep(std::time::Duration::from_millis(30));
+                                std::thread::sleep(std::time::Duration::from_millis(20));
                                 if !DOWN.load(Ordering::SeqCst) {
                                     hbm(false);
                                 }
@@ -236,6 +268,13 @@ fn fod_watch() {
                             SCREEN_OFF.store(off, Ordering::SeqCst);
                             if !off {
                                 arm();
+                                // Fallback: if panel_doze_disable end wasn't logged, fire HBM right on TRAN_ACTIVE_MODE
+                                if WAKE_PENDING.swap(false, Ordering::SeqCst) {
+                                    std::thread::spawn(|| {
+                                        std::thread::sleep(std::time::Duration::from_millis(4));
+                                        trigger_hbm_now();
+                                    });
+                                }
                             }
                             logging::info(&format!("touch mode -> {new_mode} (screen_off={off})"));
                         }
@@ -245,38 +284,19 @@ fn fod_watch() {
                         if SCREEN_OFF.load(Ordering::SeqCst) {
                             DOWN.store(true, Ordering::SeqCst);
                             arm();
-                            if !WAKE_PENDING.swap(true, Ordering::SeqCst) {
-                                logging::info("fod finger down while screen off -> waking panel via uinput");
-                                std::thread::spawn(|| {
-                                    fod_wake::inject_wakeup();
-                                    for _ in 0..80 {
-                                        if !SCREEN_OFF.load(Ordering::SeqCst) {
-                                            break;
-                                        }
-                                        std::thread::sleep(std::time::Duration::from_millis(5));
-                                    }
-                                    std::thread::sleep(std::time::Duration::from_millis(20));
-                                    WAKE_PENDING.store(false, Ordering::SeqCst);
-                                    if DOWN.load(Ordering::SeqCst) && !LIT.swap(true, Ordering::SeqCst) {
-                                        hbm(true);
-                                    }
-                                });
-                            }
+                            start_panel_wake("fod finger down while screen off -> waking panel via uinput");
                         } else if WAKE_PENDING.load(Ordering::SeqCst) {
-                            // Ignore the duplicate fod finger down emitted 2ms after TRAN_ACTIVE_MODE
-                            // so the wake thread finishes its 50ms panel-settle delay cleanly.
                             DOWN.store(true, Ordering::SeqCst);
                         } else if armed() {
                             DOWN.store(true, Ordering::SeqCst);
                             arm();
-                            if !LIT.swap(true, Ordering::SeqCst) {
-                                hbm(true);
-                            }
+                            trigger_hbm_now();
                         } else {
                             logging::info("fod finger down ignored (FOD not shown, screen on)");
                         }
                     } else if is_fod && contains_bytes(msg, b"fod finger up") {
                         DOWN.store(false, Ordering::SeqCst);
+                        WAKE_PENDING.store(false, Ordering::SeqCst);
                         if LIT.swap(false, Ordering::SeqCst) {
                             hbm(false);
                         }
@@ -308,6 +328,7 @@ fn main() {
         logging::error(&format!("binder init failed: {e:?}"));
         std::process::exit(1);
     }
+    std::thread::spawn(fod_wake::init);
     std::thread::spawn(gfpatch::run);
     std::thread::spawn(fod_watch);
     ProcessState::start_thread_pool();

@@ -89,6 +89,14 @@ fn ensure_uinput_device(guard: &mut Option<std::fs::File>) -> bool {
     true
 }
 
+/// Pre-initializes the virtual uinput device at HAL boot so the first screen-off FOD tap
+/// has zero device-creation delay.
+pub fn init() {
+    if let Ok(mut guard) = UINPUT_FD.lock() {
+        let _ = ensure_uinput_device(&mut guard);
+    }
+}
+
 fn emit_event(f: &mut std::fs::File, ev_type: u16, code: u16, value: i32) {
     let ev = InputEvent {
         tv_sec: 0,
