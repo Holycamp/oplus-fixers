@@ -23,8 +23,9 @@ fn hbm(on: bool) {
     }
 }
 
-const ARM_MS: u64 = 30_000;
+const ARM_MS: u64 = 60_000;
 static SCREEN_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static FOD_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static ARMED_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn now_ms() -> u64 {
@@ -38,7 +39,8 @@ fn disarm() {
     ARMED_UNTIL.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 fn armed() -> bool {
-    now_ms() < ARMED_UNTIL.load(std::sync::atomic::Ordering::SeqCst)
+    FOD_SHOWN.load(std::sync::atomic::Ordering::SeqCst)
+        || now_ms() < ARMED_UNTIL.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 const SERVICE_NAME: &str = "vendor.oplus.hardware.displaypanelfeature.IDisplayPanelFeature/default";
@@ -69,14 +71,28 @@ impl IDisplayPanelFeature for Dpf {
 
     fn setDisplayPanelFeatureValue(&self, id: i32, values: &[i32]) -> BinderResult<i32> {
         logging::info(&format!("set id={id} values={values:?}"));
-        if id == 22 {
-            if values.first().copied().unwrap_or(0) != 0 {
-                arm();
-                logging::info("fod armed");
-            } else {
-                disarm();
-                logging::info("fod disarmed");
+        let v0 = values.first().copied().unwrap_or(0);
+        match id {
+            // 22 = DimlayHBM, 23 = DimlayerBLEN: ColorOS FOD overlay shown/hidden
+            22 | 23 => {
+                if v0 != 0 {
+                    FOD_SHOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+                    arm();
+                    logging::info(&format!("fod armed (id={id} on)"));
+                } else {
+                    FOD_SHOWN.store(false, std::sync::atomic::Ordering::SeqCst);
+                    disarm();
+                    logging::info(&format!("fod disarmed (id={id} off)"));
+                }
             }
+            // 28 = FPPress: direct FOD finger press/release hint from ColorOS
+            28 => {
+                if v0 != 0 {
+                    FOD_SHOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+                    arm();
+                }
+            }
+            _ => {}
         }
         Ok(0)
     }
