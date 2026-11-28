@@ -33,7 +33,7 @@ jobs:
       - name: Stage /vendor/ package
         run: |
           mkdir -p dist/vendor/bin/hw dist/vendor/etc/init dist/vendor/etc/vintf/manifest
-          cp ck8nb-vendor-services/face-hal/target/aarch64-linux-android/release/android.hardware.biometrics.face-service.ck8nb dist/vendor/bin/hw/
+          cp ck8nb-vendor-services/face-hal/target/aarch64-linux-android/release/ck8nb-face-hal dist/vendor/bin/hw/android.hardware.biometrics.face-service.ck8nb
           ls -lh dist/vendor/bin/hw/
 
       - name: Upload Face HAL Artifact
